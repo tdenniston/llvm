@@ -60,11 +60,11 @@ void RegisterPressure::dump(const TargetRegisterInfo *TRI) const {
   dumpRegSetPressure(MaxSetPressure, TRI);
   dbgs() << "Live In: ";
   for (unsigned i = 0, e = LiveInRegs.size(); i < e; ++i)
-    dbgs() << PrintReg(LiveInRegs[i], TRI) << " ";
+    dbgs() << PrintVRegOrUnit(LiveInRegs[i], TRI) << " ";
   dbgs() << '\n';
   dbgs() << "Live Out: ";
   for (unsigned i = 0, e = LiveOutRegs.size(); i < e; ++i)
-    dbgs() << PrintReg(LiveOutRegs[i], TRI) << " ";
+    dbgs() << PrintVRegOrUnit(LiveOutRegs[i], TRI) << " ";
   dbgs() << '\n';
 }
 
@@ -75,6 +75,16 @@ void RegPressureTracker::dump() const {
     dumpRegSetPressure(CurrSetPressure, TRI);
   }
   P.dump(TRI);
+}
+
+void PressureDiff::dump(const TargetRegisterInfo &TRI) const {
+  for (const PressureChange &Change : *this) {
+    if (!Change.isValid() || Change.getUnitInc() == 0)
+      continue;
+    dbgs() << "    " << TRI.getRegPressureSetName(Change.getPSet())
+           << " " << Change.getUnitInc();
+  }
+  dbgs() << '\n';
 }
 
 /// Increase the current pressure as impacted by these registers and bump
@@ -787,6 +797,8 @@ getMaxUpwardPressureDelta(const MachineInstr *MI, PressureDiff *PDiff,
   RegPressureDelta Delta2;
   getUpwardPressureDelta(MI, *PDiff, Delta2, CriticalPSets, MaxPressureLimit);
   if (Delta != Delta2) {
+    dbgs() << "PDiff: ";
+    PDiff->dump(*TRI);
     dbgs() << "DELTA: " << *MI;
     if (Delta.Excess.isValid())
       dbgs() << "Excess1 " << TRI->getRegPressureSetName(Delta.Excess.getPSet())

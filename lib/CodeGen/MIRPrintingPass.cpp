@@ -12,32 +12,14 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "MIRPrinter.h"
 #include "llvm/CodeGen/Passes.h"
-#include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
-#include "llvm/IR/Module.h"
+#include "llvm/CodeGen/MIRYamlMapping.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Support/YAMLTraits.h"
 
 using namespace llvm;
-
-namespace llvm {
-namespace yaml {
-
-/// This struct serializes the LLVM IR module.
-template <> struct BlockScalarTraits<Module> {
-  static void output(const Module &Mod, void *Ctxt, raw_ostream &OS) {
-    Mod.print(OS, nullptr);
-  }
-  static StringRef input(StringRef Str, void *Ctxt, Module &Mod) {
-    llvm_unreachable("LLVM Module is supposed to be parsed separately");
-    return "";
-  }
-};
-
-} // end namespace yaml
-} // end namespace llvm
 
 namespace {
 
@@ -46,6 +28,7 @@ namespace {
 struct MIRPrintingPass : public MachineFunctionPass {
   static char ID;
   raw_ostream &OS;
+  std::string MachineFunctions;
 
   MIRPrintingPass() : MachineFunctionPass(ID), OS(dbgs()) {}
   MIRPrintingPass(raw_ostream &OS) : MachineFunctionPass(ID), OS(OS) {}
@@ -58,13 +41,16 @@ struct MIRPrintingPass : public MachineFunctionPass {
   }
 
   virtual bool runOnMachineFunction(MachineFunction &MF) override {
-    // TODO: Print out the machine function.
+    std::string Str;
+    raw_string_ostream StrOS(Str);
+    printMIR(StrOS, MF);
+    MachineFunctions.append(StrOS.str());
     return false;
   }
 
   virtual bool doFinalization(Module &M) override {
-    yaml::Output Out(OS);
-    Out << M;
+    printMIR(OS, M);
+    OS << MachineFunctions;
     return false;
   }
 };

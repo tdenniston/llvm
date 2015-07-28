@@ -399,8 +399,8 @@ static bool doesNotRequireEntrySafepointBefore(const CallSite &CS) {
       // at least if they do, are leaf functions that cause only finite stack
       // growth.  In particular, the optimizer likes to form things like memsets
       // out of stores in the original IR.  Another important example is
-      // llvm.frameescape which must occur in the entry block.  Inserting a
-      // safepoint before it is not legal since it could push the frameescape
+      // llvm.localescape which must occur in the entry block.  Inserting a
+      // safepoint before it is not legal since it could push the localescape
       // out of the entry block.
       return true;
     }
@@ -496,7 +496,7 @@ template <typename T> static void unique_unsorted(std::vector<T> &vec) {
   }
 }
 
-static std::string GCSafepointPollName("gc.safepoint_poll");
+static const char *const GCSafepointPollName = "gc.safepoint_poll";
 
 static bool isGCSafepointPoll(Function &F) {
   return F.getName().equals(GCSafepointPollName);

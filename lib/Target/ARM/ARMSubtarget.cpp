@@ -40,13 +40,6 @@ using namespace llvm;
 #include "ARMGenSubtargetInfo.inc"
 
 static cl::opt<bool>
-ReserveR9("arm-reserve-r9", cl::Hidden,
-          cl::desc("Reserve R9, making it unavailable as GPR"));
-
-static cl::opt<bool>
-ArmUseMOVT("arm-use-movt", cl::init(true), cl::Hidden);
-
-static cl::opt<bool>
 UseFusedMulOps("arm-use-mulops",
                cl::init(true), cl::Hidden);
 
@@ -106,13 +99,12 @@ ARMFrameLowering *ARMSubtarget::initializeFrameLowering(StringRef CPU,
   return new ARMFrameLowering(STI);
 }
 
-ARMSubtarget::ARMSubtarget(const std::string &TT, const std::string &CPU,
+ARMSubtarget::ARMSubtarget(const Triple &TT, const std::string &CPU,
                            const std::string &FS,
                            const ARMBaseTargetMachine &TM, bool IsLittle)
     : ARMGenSubtargetInfo(TT, CPU, FS), ARMProcFamily(Others),
       ARMProcClass(None), stackAlignment(4), CPUString(CPU), IsLittle(IsLittle),
       TargetTriple(TT), Options(TM.Options), TM(TM),
-      TSInfo(*TM.getDataLayout()),
       FrameLowering(initializeFrameLowering(CPU, FS)),
       // At this point initializeSubtargetDependencies has been called so
       // we can query directly.
@@ -148,8 +140,8 @@ void ARMSubtarget::initializeEnvironment() {
   UseSoftFloat = false;
   HasThumb2 = false;
   NoARM = false;
-  IsR9Reserved = ReserveR9;
-  UseMovt = false;
+  ReserveR9 = false;
+  NoMovt = false;
   SupportsTailCall = false;
   HasFP16 = false;
   HasD16 = false;
@@ -172,6 +164,7 @@ void ARMSubtarget::initializeEnvironment() {
   AllowsUnalignedMem = false;
   Thumb2DSP = false;
   UseNaClTrap = false;
+  GenLongCalls = false;
   UnsafeFPMath = false;
 }
 
@@ -187,8 +180,7 @@ void ARMSubtarget::initSubtargetFeatures(StringRef CPU, StringRef FS) {
   // Insert the architecture feature derived from the target triple into the
   // feature string. This is important for setting features that are implied
   // based on the architecture version.
-  std::string ArchFS =
-      ARM_MC::ParseARMTriple(TargetTriple.getTriple(), CPUString);
+  std::string ArchFS = ARM_MC::ParseARMTriple(TargetTriple, CPUString);
   if (!FS.empty()) {
     if (!ArchFS.empty())
       ArchFS = (Twine(ArchFS) + "," + FS).str();
@@ -216,15 +208,10 @@ void ARMSubtarget::initSubtargetFeatures(StringRef CPU, StringRef FS) {
   if (isTargetNaCl())
     stackAlignment = 16;
 
-  UseMovt = hasV6T2Ops() && ArmUseMOVT;
-
-  if (isTargetMachO()) {
-    IsR9Reserved = ReserveR9 || !HasV6Ops;
+  if (isTargetMachO())
     SupportsTailCall = !isTargetIOS() || !getTargetTriple().isOSVersionLT(5, 0);
-  } else {
-    IsR9Reserved = ReserveR9;
+  else
     SupportsTailCall = !isThumb1Only();
-  }
 
   if (Align == DefaultAlign) {
     // Assume pre-ARMv6 doesn't support unaligned accesses.
@@ -287,7 +274,7 @@ ARMSubtarget::GVIsIndirectSymbol(const GlobalValue *GV,
   if (RelocM == Reloc::Static)
     return false;
 
-  bool isDecl = GV->isDeclarationForLinker();
+  bool isDef = GV->isStrongDefinitionForLinker();
 
   if (!isTargetMachO()) {
     // Extra load is needed for all externally visible.
@@ -295,33 +282,21 @@ ARMSubtarget::GVIsIndirectSymbol(const GlobalValue *GV,
       return false;
     return true;
   } else {
+    // If this is a strong reference to a definition, it is definitely not
+    // through a stub.
+    if (isDef)
+      return false;
+
+    // Unless we have a symbol with hidden visibility, we have to go through a
+    // normal $non_lazy_ptr stub because this symbol might be resolved late.
+    if (!GV->hasHiddenVisibility())  // Non-hidden $non_lazy_ptr reference.
+      return true;
+
     if (RelocM == Reloc::PIC_) {
-      // If this is a strong reference to a definition, it is definitely not
-      // through a stub.
-      if (!isDecl && !GV->isWeakForLinker())
-        return false;
-
-      // Unless we have a symbol with hidden visibility, we have to go through a
-      // normal $non_lazy_ptr stub because this symbol might be resolved late.
-      if (!GV->hasHiddenVisibility())  // Non-hidden $non_lazy_ptr reference.
-        return true;
-
       // If symbol visibility is hidden, we have a stub for common symbol
       // references and external declarations.
-      if (isDecl || GV->hasCommonLinkage())
+      if (GV->isDeclarationForLinker() || GV->hasCommonLinkage())
         // Hidden $non_lazy_ptr reference.
-        return true;
-
-      return false;
-    } else {
-      // If this is a strong reference to a definition, it is definitely not
-      // through a stub.
-      if (!isDecl && !GV->isWeakForLinker())
-        return false;
-
-      // Unless we have a symbol with hidden visibility, we have to go through a
-      // normal $non_lazy_ptr stub because this symbol might be resolved late.
-      if (!GV->hasHiddenVisibility())  // Non-hidden $non_lazy_ptr reference.
         return true;
     }
   }
@@ -337,8 +312,19 @@ bool ARMSubtarget::hasSinCos() const {
   return getTargetTriple().isiOS() && !getTargetTriple().isOSVersionLT(7, 0);
 }
 
+bool ARMSubtarget::enableMachineScheduler() const {
+  // Enable the MachineScheduler before register allocation for out-of-order
+  // architectures where we do not use the PostRA scheduler anymore (for now
+  // restricted to swift).
+  return getSchedModel().isOutOfOrder() && isSwift();
+}
+
 // This overrides the PostRAScheduler bit in the SchedModel for any CPU.
-bool ARMSubtarget::enablePostMachineScheduler() const {
+bool ARMSubtarget::enablePostRAScheduler() const {
+  // No need for PostRA scheduling on out of order CPUs (for now restricted to
+  // swift).
+  if (getSchedModel().isOutOfOrder() && isSwift())
+    return false;
   return (!isThumb() || hasThumb2());
 }
 
@@ -350,8 +336,9 @@ bool ARMSubtarget::useMovt(const MachineFunction &MF) const {
   // NOTE Windows on ARM needs to use mov.w/mov.t pairs to materialise 32-bit
   // immediates as it is inherently position independent, and may be out of
   // range otherwise.
-  return UseMovt && (isTargetWindows() ||
-                     !MF.getFunction()->hasFnAttribute(Attribute::MinSize));
+  return !NoMovt && hasV6T2Ops() &&
+         (isTargetWindows() ||
+          !MF.getFunction()->hasFnAttribute(Attribute::MinSize));
 }
 
 bool ARMSubtarget::useFastISel() const {

@@ -457,22 +457,34 @@ let Uses = [RM] in {
 
   defm XVCMPEQDP : XX3Form_Rcr<60, 99,
                              (outs vsrc:$XT), (ins vsrc:$XA, vsrc:$XB),
-                             "xvcmpeqdp", "$XT, $XA, $XB", IIC_VecFPCompare, []>;
+                             "xvcmpeqdp", "$XT, $XA, $XB", IIC_VecFPCompare,
+                             [(set v2i64:$XT,
+                                (int_ppc_vsx_xvcmpeqdp v2f64:$XA, v2f64:$XB))]>;
   defm XVCMPEQSP : XX3Form_Rcr<60, 67,
                              (outs vsrc:$XT), (ins vsrc:$XA, vsrc:$XB),
-                             "xvcmpeqsp", "$XT, $XA, $XB", IIC_VecFPCompare, []>;
+                             "xvcmpeqsp", "$XT, $XA, $XB", IIC_VecFPCompare,
+                             [(set v4i32:$XT,
+                                (int_ppc_vsx_xvcmpeqsp v4f32:$XA, v4f32:$XB))]>;
   defm XVCMPGEDP : XX3Form_Rcr<60, 115,
                              (outs vsrc:$XT), (ins vsrc:$XA, vsrc:$XB),
-                             "xvcmpgedp", "$XT, $XA, $XB", IIC_VecFPCompare, []>;
+                             "xvcmpgedp", "$XT, $XA, $XB", IIC_VecFPCompare,
+                             [(set v2i64:$XT,
+                                (int_ppc_vsx_xvcmpgedp v2f64:$XA, v2f64:$XB))]>;
   defm XVCMPGESP : XX3Form_Rcr<60, 83,
                              (outs vsrc:$XT), (ins vsrc:$XA, vsrc:$XB),
-                             "xvcmpgesp", "$XT, $XA, $XB", IIC_VecFPCompare, []>;
+                             "xvcmpgesp", "$XT, $XA, $XB", IIC_VecFPCompare,
+                             [(set v4i32:$XT,
+                                (int_ppc_vsx_xvcmpgesp v4f32:$XA, v4f32:$XB))]>;
   defm XVCMPGTDP : XX3Form_Rcr<60, 107,
                              (outs vsrc:$XT), (ins vsrc:$XA, vsrc:$XB),
-                             "xvcmpgtdp", "$XT, $XA, $XB", IIC_VecFPCompare, []>;
+                             "xvcmpgtdp", "$XT, $XA, $XB", IIC_VecFPCompare,
+                             [(set v2i64:$XT,
+                                (int_ppc_vsx_xvcmpgtdp v2f64:$XA, v2f64:$XB))]>;
   defm XVCMPGTSP : XX3Form_Rcr<60, 75,
                              (outs vsrc:$XT), (ins vsrc:$XA, vsrc:$XB),
-                             "xvcmpgtsp", "$XT, $XA, $XB", IIC_VecFPCompare, []>;
+                             "xvcmpgtsp", "$XT, $XA, $XB", IIC_VecFPCompare,
+                             [(set v4i32:$XT,
+                                (int_ppc_vsx_xvcmpgtsp v4f32:$XA, v4f32:$XB))]>;
 
   // Move Instructions
   def XSABSDP : XX2Form<60, 345,
@@ -977,6 +989,18 @@ def : Pat<(int_ppc_vsx_xvdivsp v4f32:$A, v4f32:$B),
 def : Pat<(int_ppc_vsx_xvdivdp v2f64:$A, v2f64:$B),
           (XVDIVDP $A, $B)>;
 
+// Reciprocal estimate
+def : Pat<(int_ppc_vsx_xvresp v4f32:$A),
+          (XVRESP $A)>;
+def : Pat<(int_ppc_vsx_xvredp v2f64:$A),
+          (XVREDP $A)>;
+
+// Recip. square root estimate
+def : Pat<(int_ppc_vsx_xvrsqrtesp v4f32:$A),
+          (XVRSQRTESP $A)>;
+def : Pat<(int_ppc_vsx_xvrsqrtedp v2f64:$A),
+          (XVRSQRTEDP $A)>;
+
 } // AddedComplexity
 } // HasVSX
 
@@ -1000,6 +1024,9 @@ let AddedComplexity = 400 in { // Prefer VSX patterns over non-VSX patterns.
                           [(set v4i32:$XT, (vnot_ppc (and v4i32:$XA,
                                                     v4i32:$XB)))]>;
   } // isCommutable
+
+  def : Pat<(int_ppc_vsx_xxleqv v4i32:$A, v4i32:$B),
+            (XXLEQV $A, $B)>;
 
   def XXLORC : XX3Form<60, 170,
                        (outs vsrc:$XT), (ins vsrc:$XA, vsrc:$XB),
@@ -1078,6 +1105,82 @@ let AddedComplexity = 400 in { // Prefer VSX patterns over non-VSX patterns.
                         (outs vssrc:$XT), (ins vssrc:$XA, vssrc:$XB),
                         "xssubsp $XT, $XA, $XB", IIC_VecFP,
                         [(set f32:$XT, (fsub f32:$XA, f32:$XB))]>;
+
+  // FMA Instructions
+  let BaseName = "XSMADDASP" in {
+  let isCommutable = 1 in
+  def XSMADDASP : XX3Form<60, 1,
+                          (outs vssrc:$XT),
+                          (ins vssrc:$XTi, vssrc:$XA, vssrc:$XB),
+                          "xsmaddasp $XT, $XA, $XB", IIC_VecFP,
+                          [(set f32:$XT, (fma f32:$XA, f32:$XB, f32:$XTi))]>,
+                          RegConstraint<"$XTi = $XT">, NoEncode<"$XTi">,
+                          AltVSXFMARel;
+  let IsVSXFMAAlt = 1 in
+  def XSMADDMSP : XX3Form<60, 9,
+                          (outs vssrc:$XT),
+                          (ins vssrc:$XTi, vssrc:$XA, vssrc:$XB),
+                          "xsmaddmsp $XT, $XA, $XB", IIC_VecFP, []>,
+                          RegConstraint<"$XTi = $XT">, NoEncode<"$XTi">,
+                          AltVSXFMARel;
+  }
+
+  let BaseName = "XSMSUBASP" in {
+  let isCommutable = 1 in
+  def XSMSUBASP : XX3Form<60, 17,
+                          (outs vssrc:$XT),
+                          (ins vssrc:$XTi, vssrc:$XA, vssrc:$XB),
+                          "xsmsubasp $XT, $XA, $XB", IIC_VecFP,
+                          [(set f32:$XT, (fma f32:$XA, f32:$XB,
+                                              (fneg f32:$XTi)))]>,
+                          RegConstraint<"$XTi = $XT">, NoEncode<"$XTi">,
+                          AltVSXFMARel;
+  let IsVSXFMAAlt = 1 in
+  def XSMSUBMSP : XX3Form<60, 25,
+                          (outs vssrc:$XT),
+                          (ins vssrc:$XTi, vssrc:$XA, vssrc:$XB),
+                          "xsmsubmsp $XT, $XA, $XB", IIC_VecFP, []>,
+                          RegConstraint<"$XTi = $XT">, NoEncode<"$XTi">,
+                          AltVSXFMARel;
+  }
+
+  let BaseName = "XSNMADDASP" in {
+  let isCommutable = 1 in
+  def XSNMADDASP : XX3Form<60, 129,
+                          (outs vssrc:$XT),
+                          (ins vssrc:$XTi, vssrc:$XA, vssrc:$XB),
+                          "xsnmaddasp $XT, $XA, $XB", IIC_VecFP,
+                          [(set f32:$XT, (fneg (fma f32:$XA, f32:$XB,
+                                                    f32:$XTi)))]>,
+                          RegConstraint<"$XTi = $XT">, NoEncode<"$XTi">,
+                          AltVSXFMARel;
+  let IsVSXFMAAlt = 1 in
+  def XSNMADDMSP : XX3Form<60, 137,
+                          (outs vssrc:$XT),
+                          (ins vssrc:$XTi, vssrc:$XA, vssrc:$XB),
+                          "xsnmaddmsp $XT, $XA, $XB", IIC_VecFP, []>,
+                          RegConstraint<"$XTi = $XT">, NoEncode<"$XTi">,
+                          AltVSXFMARel;
+  }
+
+  let BaseName = "XSNMSUBASP" in {
+  let isCommutable = 1 in
+  def XSNMSUBASP : XX3Form<60, 145,
+                          (outs vssrc:$XT),
+                          (ins vssrc:$XTi, vssrc:$XA, vssrc:$XB),
+                          "xsnmsubasp $XT, $XA, $XB", IIC_VecFP,
+                          [(set f32:$XT, (fneg (fma f32:$XA, f32:$XB,
+                                                    (fneg f32:$XTi))))]>,
+                          RegConstraint<"$XTi = $XT">, NoEncode<"$XTi">,
+                          AltVSXFMARel;
+  let IsVSXFMAAlt = 1 in
+  def XSNMSUBMSP : XX3Form<60, 153,
+                          (outs vssrc:$XT),
+                          (ins vssrc:$XTi, vssrc:$XA, vssrc:$XB),
+                          "xsnmsubmsp $XT, $XA, $XB", IIC_VecFP, []>,
+                          RegConstraint<"$XTi = $XT">, NoEncode<"$XTi">,
+                          AltVSXFMARel;
+  }
 } // AddedComplexity = 400
 } // HasP8Vector
 
