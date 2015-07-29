@@ -29,7 +29,7 @@ bool OpenKimono::runOnModule(Module &M) {
   this->M = &M;
   Ctx = &M.getContext();
   // create the functions that will need to be inserted
-  createHooks();
+  createHooks(M);
   // go through the module and insert functions (add more calls here)
   for (Function &F : M) {
     insertFunctionHooks(F);
@@ -39,7 +39,7 @@ bool OpenKimono::runOnModule(Module &M) {
 }
 
 // Create all functions to insert later
-void OpenKimono::createHooks() {
+void OpenKimono::createHooks(Module &M) {
 
 }
 
