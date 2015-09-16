@@ -95,6 +95,19 @@ llvm::collectUsedGlobalVariables(Module &M, SmallPtrSetImpl<GlobalValue *> &Set,
   return GV;
 }
 
+// XXX: Should really combine the two functions below, but didn't want to
+// change all files that uses checkSanitizerInterfaceFunction, so leave them
+// alone for now ... 
+Function *llvm::checkOkInterfaceFunction(Constant *FuncOrBitcast) {
+  if (isa<Function>(FuncOrBitcast))
+    return cast<Function>(FuncOrBitcast);
+  FuncOrBitcast->dump();
+  std::string Err;
+  raw_string_ostream Stream(Err);
+  Stream << "OpenKimono interface function redefined: " << *FuncOrBitcast;
+  report_fatal_error(Err);
+}
+
 Function *llvm::checkSanitizerInterfaceFunction(Constant *FuncOrBitcast) {
   if (isa<Function>(FuncOrBitcast))
     return cast<Function>(FuncOrBitcast);

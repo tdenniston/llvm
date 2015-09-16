@@ -360,10 +360,13 @@ bool ThreadSanitizer::runOnFunction(Function &F) {
         if (isa<MemIntrinsic>(Inst))
           MemIntrinCalls.push_back(&Inst);
         HasCalls = true;
+        // traverse the Locals and dump the ones to instrument into All when
+        // we encounter a call / invoke
         chooseInstructionsToInstrument(LocalLoadsAndStores, AllLoadsAndStores,
                                        DL);
       }
     }
+    // also do that per basic block 
     chooseInstructionsToInstrument(LocalLoadsAndStores, AllLoadsAndStores, DL);
   }
 
@@ -541,6 +544,7 @@ bool ThreadSanitizer::instrumentAtomic(Instruction *I, const DataLayout &DL) {
     int Idx = getMemoryAccessFuncIndex(Addr, DL);
     if (Idx < 0)
       return false;
+    // Ange: getOperation() returns enum value of Add, Sub, Or, ... etc.
     Function *F = TsanAtomicRMW[RMWI->getOperation()][Idx];
     if (!F)
       return false;
