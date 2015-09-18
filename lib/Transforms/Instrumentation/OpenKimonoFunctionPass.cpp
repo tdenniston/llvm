@@ -59,20 +59,26 @@ private:
   Function *OkBeforeWrite[kNumberOfAccessSizes];
   Function *OkAfterWrite[kNumberOfAccessSizes];
 
+  /*
   Function *OkAfterReadFloat;
   Function *OkAfterReadDouble;
   Function *OkBeforeWriteFloat;
   Function *OkBeforeWriteDouble;
+  */
 }; //struct OpenKimonoFunctionPass
 
 } //namespace
 
 // the address matters but not the init value
 char OpenKimonoFunctionPass::ID = 0;
+INITIALIZE_PASS(OpenKimonoFunctionPass, "OK-func", "OpenKimono function pass",
+                false, false)
 
 // XXX for now let's always register it; move it to commnad line option later
+/*
 static RegisterPass<OpenKimonoFunctionPass>
 OkFunctonPass("ok-func", "OpenKimono function pass", false, false);
+*/
 
 const char *OpenKimonoFunctionPass::getPassName() const {
   return "OpenKimonoFunctionPass";
@@ -149,6 +155,7 @@ void OpenKimonoFunctionPass::initializeLoadStoreCallbacks(Module &M) {
   // void __ok_after_load8(void *addr, int attr, double val);
   // void __ok_before_store4(void *addr, int attr, float val);
   // void __ok_before_store8(void *addr, int attr, float val);
+  /*
   Type *FloatValType = IRB.getFloatTy();
   Type *DoubleValType = IRB.getDoubleTy();
 
@@ -171,6 +178,7 @@ void OpenKimonoFunctionPass::initializeLoadStoreCallbacks(Module &M) {
   OkBeforeWriteDouble = checkSanitizerInterfaceFunction(
       M.getOrInsertFunction(BeforeWriteDouble, RetType, 
         AddrType, AttrType, DoubleValType, nullptr));
+  */
 }
 
 int OpenKimonoFunctionPass::getMemoryAccessFuncIndex(Value *Addr,
@@ -224,8 +232,10 @@ bool OpenKimonoFunctionPass::instrumentLoadOrStore(inst_iterator Iter,
     Type *SType = S->getValueOperand()->getType();
     Function *BeforeF = OkBeforeWrite[Idx];
 
+    /*
     if(SType == IRB.getFloatTy()) { BeforeF = OkBeforeWriteFloat; } 
     else if(SType == IRB.getDoubleTy()) { BeforeF = OkBeforeWriteDouble; }
+    */
 
     DEBUG_WITH_TYPE("ok-func", 
         errs() << "OK_func: creating call to before store for size " 
@@ -234,8 +244,8 @@ bool OpenKimonoFunctionPass::instrumentLoadOrStore(inst_iterator Iter,
         // XXX: should I just use the pointer type with the right size?
         {IRB.CreatePointerCast(Addr, AddrType),
          IRB.getInt32(0), // XXX: use 0 for attr for now; FIXME 
-         IRB.CreatePointerCast(S->getValueOperand(), AccessType[Idx])});
-         // S->getValueOperand()});
+         // IRB.CreateIntCast(S->getValueOperand(), AccessType[Idx])});
+         S->getValueOperand()});
     // move pass the actual store instruction; 
     // the inserted instruction doesn't seem to count.
     Iter++;
@@ -255,9 +265,10 @@ bool OpenKimonoFunctionPass::instrumentLoadOrStore(inst_iterator Iter,
     Type *LType = L->getType();
     Function *AfterF = OkAfterRead[Idx];
 
+    /*
     if(LType == IRB.getFloatTy()) { AfterF = OkAfterReadFloat; } 
     else if(LType == IRB.getDoubleTy()) { AfterF = OkAfterReadDouble; }
-
+    */
 
     DEBUG_WITH_TYPE("ok-func", 
         errs() << "OK_func: creating call to before load for size " 
@@ -280,7 +291,7 @@ bool OpenKimonoFunctionPass::instrumentLoadOrStore(inst_iterator Iter,
          IRB.getInt32(0),
          // In LLVM, the instruction pointer represents its result
          // so we are basically passing the result of the load as 3rd arg
-         // IRB.CreatePointerCast(L, AccessType[Idx])});
+         // IRB.CreateIntCast(L, AccessType[Idx])});
          L});
     NumInstrumentedReads++;
   }
