@@ -5,6 +5,9 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
@@ -47,6 +50,8 @@ private:
   int getMemoryAccessFuncIndex(Value *Addr, const DataLayout &DL); 
   // initialize OK instrumentation functions for load and store 
   void initializeLoadStoreCallbacks(Module &M);
+  // initialize OK instrumentation functions for function entry and exit
+  void initializeFuncCallbacks(Module &M);
   // actually insert the instrumentation call
   bool instrumentLoadOrStore(inst_iterator Iter, const DataLayout &DL);
 
@@ -58,6 +63,9 @@ private:
   Function *OkAfterRead[kNumberOfAccessSizes];
   Function *OkBeforeWrite[kNumberOfAccessSizes];
   Function *OkAfterWrite[kNumberOfAccessSizes];
+
+  Function *OkFuncEntry;
+  Function *OkFuncExit;
 
   /*
   Function *OkAfterReadFloat;
@@ -86,6 +94,20 @@ const char *OpenKimonoFunctionPass::getPassName() const {
 
 FunctionPass *llvm::createOpenKimonoFunctionPass() {
   return new OpenKimonoFunctionPass();
+}
+
+/**
+ * initialize the declaration of function call instrumentation functions
+ *
+ * void __ok_func_entry(void *parentReturnAddress, char *funcName);
+ * void __ok_func_exit();
+ */
+void OpenKimonoFunctionPass::initializeFuncCallbacks(Module &M) {
+  IRBuilder<> IRB(M.getContext());
+  OkFuncEntry = checkSanitizerInterfaceFunction(M.getOrInsertFunction(
+      "__ok_func_entry", IRB.getVoidTy(), IRB.getInt8PtrTy(), IRB.getInt8PtrTy(), nullptr));
+  OkFuncExit = checkSanitizerInterfaceFunction(
+      M.getOrInsertFunction("__ok_func_exit", IRB.getVoidTy(), nullptr));
 }
 
 /** 
@@ -301,6 +323,7 @@ bool OpenKimonoFunctionPass::instrumentLoadOrStore(inst_iterator Iter,
 
 bool OpenKimonoFunctionPass::doInitialization(Module &M) {
   DEBUG_WITH_TYPE("ok-func", errs() << "OK_func: doInitialization" << "\n");
+  initializeFuncCallbacks(M);
   initializeLoadStoreCallbacks(M);
   DEBUG_WITH_TYPE("ok-func", 
       errs() << "OK_func: doInitialization done" << "\n");
@@ -311,11 +334,12 @@ bool OpenKimonoFunctionPass::doInitialization(Module &M) {
 bool OpenKimonoFunctionPass::runOnFunction(Function &F) {
 
   DEBUG_WITH_TYPE("ok-func", 
-                  errs() << "OK_func: run on funciont " << F.getName() << "\n");
+                  errs() << "OK_func: run on function " << F.getName() << "\n");
 
   SmallVector<Instruction*, 8> AllLoadsAndStores;
   SmallVector<Instruction*, 8> LocalLoadsAndStores;
-  bool Modified = false;
+  SmallVector<inst_iterator, 8> RetVec;
+  bool Modified = false, HasCalls = false;
   const DataLayout &DL = F.getParent()->getDataLayout();
 
   // Traverse all instructions in a function and insert instrumentation 
@@ -324,12 +348,39 @@ bool OpenKimonoFunctionPass::runOnFunction(Function &F) {
     // We need the Instruction Iterator to modify the code
     if (isa<LoadInst>(*I) || isa<StoreInst>(*I)) {
       Modified |= instrumentLoadOrStore(I, DL);
+    } else if (isa<ReturnInst>(*I)) {
+      RetVec.push_back(I);
+    } else if (isa<CallInst>(*I) || isa<InvokeInst>(*I)) {
+      // DD: If we decide to track memset, memcpy, etc, we can uncomment the
+      // next two lines
+      // if (isa<MemIntrinsic>(I))
+        // MemIntrinCalls.push_back(&I);
+
+      HasCalls = true;
     }
+  }
+
+  // Instrument function entry/exit points if there were instrumented accesses.
+  if (HasCalls || Modified) {
+    IRBuilder<> IRB(F.getEntryBlock().getFirstNonPHI());
+    Value *FunctionName = IRB.CreateGlobalStringPtr(F.getName());
+    Value *ReturnAddress = IRB.CreateCall(
+        Intrinsic::getDeclaration(F.getParent(), Intrinsic::returnaddress),
+        IRB.getInt32(0));
+    IRB.CreateCall(OkFuncEntry, {ReturnAddress, FunctionName});
+
+    for (inst_iterator I : RetVec) {
+      Instruction *RetInst = &(*I);
+      IRBuilder<> IRBRet(RetInst);
+      IRBRet.CreateCall(OkFuncExit, {});
+    }
+
+    Modified = true;
   }
 
   if(Modified) {
     DEBUG_WITH_TYPE("ok-func", 
-        errs() << "OK_func: modified funciont " << F.getName() << "\n");
+        errs() << "OK_func: modified function " << F.getName() << "\n");
   }
   return Modified;
 }
