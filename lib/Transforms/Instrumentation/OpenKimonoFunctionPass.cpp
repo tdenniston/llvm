@@ -33,6 +33,9 @@ STATISTIC(NumInstrumentedReads, "Number of instrumented reads");
 STATISTIC(NumInstrumentedWrites, "Number of instrumented writes");
 STATISTIC(NumAccessesWithBadSize, "Number of accesses with bad size");
 
+static const char *const OkModuleCtorName = "ok.module_ctor";
+static const char *const OkInitName = "__ok_init";
+
 namespace {
 
 struct OpenKimonoFunctionPass : public FunctionPass {
@@ -54,6 +57,8 @@ private:
   void initializeFuncCallbacks(Module &M);
   // actually insert the instrumentation call
   bool instrumentLoadOrStore(inst_iterator Iter, const DataLayout &DL);
+
+  Function *OkCtorFunction;
 
   // Accesses sizes are powers of two in bit size: 8, 16, 32, and 64
   static const size_t kNumberOfAccessSizes = 4;
@@ -317,6 +322,12 @@ bool OpenKimonoFunctionPass::instrumentLoadOrStore(inst_iterator Iter,
 
 bool OpenKimonoFunctionPass::doInitialization(Module &M) {
   DEBUG_WITH_TYPE("ok-func", errs() << "OK_func: doInitialization" << "\n");
+
+  std::tie(OkCtorFunction, std::ignore) = createSanitizerCtorAndInitFunctions(
+      M, OkModuleCtorName, OkInitName, /*InitArgTypes=*/{},
+      /*InitArgs=*/{});
+  appendToGlobalCtors(M, OkCtorFunction, 0);
+
   initializeFuncCallbacks(M);
   initializeLoadStoreCallbacks(M);
   DEBUG_WITH_TYPE("ok-func",
@@ -326,6 +337,10 @@ bool OpenKimonoFunctionPass::doInitialization(Module &M) {
 }
 
 bool OpenKimonoFunctionPass::runOnFunction(Function &F) {
+  // This is required to prevent instrumenting call to __ok_init from within
+  // the module constructor.
+  if (&F == OkCtorFunction)
+      return false;
 
   DEBUG_WITH_TYPE("ok-func",
                   errs() << "OK_func: run on function " << F.getName() << "\n");
