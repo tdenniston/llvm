@@ -319,6 +319,7 @@ bool OpenKimonoFunctionPass::runOnFunction(Function &F) {
 
   for (BasicBlock &BB : F) {
       Modified |= instrumentBasicBlock(BB);
+  }
 
   // Instrument function entry/exit points if there were instrumented accesses.
   if (HasCalls || Modified) {
@@ -344,4 +345,3 @@ bool OpenKimonoFunctionPass::runOnFunction(Function &F) {
   }
   return Modified;
 }
-
