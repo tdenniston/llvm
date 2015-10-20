@@ -49,6 +49,8 @@ private:
   void initializeLoadStoreCallbacks(Module &M);
   // actually insert the instrumentation call
   bool instrumentLoadOrStore(inst_iterator Iter, const DataLayout &DL);
+  // Instrument basic block entry/exit
+  bool instrumentBasicBlock(BasicBlock &BB);
 
   // Accesses sizes are powers of two in bit size: 8, 16, 32, and 64
   static const size_t kNumberOfAccessSizes = 4;
@@ -299,6 +301,23 @@ bool OpenKimonoFunctionPass::instrumentLoadOrStore(inst_iterator Iter,
   return true;
 }
 
+bool OpenKimonoFunctionPass::instrumentBasicBlock(BasicBlock &BB) {
+  static int id = 0;
+  Module &M = *BB.getModule();
+  Instruction *Entry = BB.getFirstInsertionPt();
+  IRBuilder<> IRB(Entry);
+
+  Type *RetType = IRB.getVoidTy();            // return void
+  Type *AddrType = IRB.getInt8PtrTy();        // void *val
+  Type *AttrType = IRB.getInt32Ty();          // int attr
+  Type *IdType = IRB.getInt32Ty();
+
+  Function *F = checkOkInterfaceFunction(
+      M.getOrInsertFunction("__ok_bb_entry", RetType, IdType, AttrType, nullptr));
+  IRB.CreateCall(F, {IRB.getInt32(id++), IRB.getInt32(0)});
+  return true;
+}
+
 bool OpenKimonoFunctionPass::doInitialization(Module &M) {
   DEBUG_WITH_TYPE("ok-func", errs() << "OK_func: doInitialization" << "\n");
   initializeLoadStoreCallbacks(M);
@@ -325,6 +344,10 @@ bool OpenKimonoFunctionPass::runOnFunction(Function &F) {
     if (isa<LoadInst>(*I) || isa<StoreInst>(*I)) {
       Modified |= instrumentLoadOrStore(I, DL);
     }
+  }
+
+  for (BasicBlock &BB : F) {
+      Modified |= instrumentBasicBlock(BB);
   }
 
   if(Modified) {
