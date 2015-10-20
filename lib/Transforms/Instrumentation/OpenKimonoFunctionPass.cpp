@@ -32,6 +32,7 @@ using namespace llvm;
 STATISTIC(NumInstrumentedReads, "Number of instrumented reads");
 STATISTIC(NumInstrumentedWrites, "Number of instrumented writes");
 STATISTIC(NumAccessesWithBadSize, "Number of accesses with bad size");
+STATISTIC(NumInstrumentedBBs, "Number of instrumented basic blocks");
 
 static const char *const OkModuleCtorName = "ok.module_ctor";
 static const char *const OkInitName = "__ok_init";
@@ -265,15 +266,27 @@ bool OpenKimonoFunctionPass::instrumentBasicBlock(BasicBlock &BB) {
   Function *F = checkOkInterfaceFunction(
       M.getOrInsertFunction("__ok_bb_entry", RetType, IdType, AttrType, nullptr));
   IRB.CreateCall(F, {IRB.getInt32(id++), IRB.getInt32(0)});
+  ++NumInstrumentedBBs;
   return true;
 }
 
 bool OpenKimonoFunctionPass::doInitialization(Module &M) {
   DEBUG_WITH_TYPE("ok-func", errs() << "OK_func: doInitialization" << "\n");
 
+  IRBuilder<> IRB(M.getContext());
+
+  StructType *CsiInfoStructType =
+      StructType::create(M.getContext(), {IRB.getInt64Ty()});
+  unsigned long NumBBs = 0;
+  for (Function &F : M) {
+      NumBBs += F.size();
+  }
+  Value *CsiInfo = ConstantStruct::get(CsiInfoStructType, IRB.getInt64(NumBBs), nullptr);
+
   std::tie(OkCtorFunction, std::ignore) = createSanitizerCtorAndInitFunctions(
-      M, OkModuleCtorName, OkInitName, /*InitArgTypes=*/{},
-      /*InitArgs=*/{});
+      M, OkModuleCtorName, OkInitName,
+      /*InitArgTypes=*/{CsiInfoStructType},
+      /*InitArgs=*/{CsiInfo});
   appendToGlobalCtors(M, OkCtorFunction, 0);
 
   initializeFuncCallbacks(M);
