@@ -31,8 +31,7 @@ void llvm::initializeInstrumentation(PassRegistry &Registry) {
   initializeSanitizerCoverageModulePass(Registry);
   initializeDataFlowSanitizerPass(Registry);
   initializeSafeStackPass(Registry);
-  // ANGE XXX
-  initializeOpenKimonoFunctionPassPass(Registry);
+  initializeCodeSpectatorInterfacePass(Registry);
 }
 
 /// LLVMInitializeInstrumentation - C binding for

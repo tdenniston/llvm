@@ -83,9 +83,9 @@ struct InstrProfOptions {
 ModulePass *createInstrProfilingPass(
     const InstrProfOptions &Options = InstrProfOptions());
 
-// Insert OpenKimono instrumentation
+// Insert CodeSpectatorInterface instrumentation
 // ANGE XXX: Should probably add different compiler flag options
-FunctionPass *createOpenKimonoFunctionPass();
+FunctionPass *createCodeSpectatorInterfacePass();
 
 // Insert AddressSanitizer (address sanity checking) instrumentation
 FunctionPass *createAddressSanitizerFunctionPass(bool CompileKernel = false);

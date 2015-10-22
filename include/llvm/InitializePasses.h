@@ -126,8 +126,7 @@ void initializeAddressSanitizerPass(PassRegistry&);
 void initializeAddressSanitizerModulePass(PassRegistry&);
 void initializeMemorySanitizerPass(PassRegistry&);
 void initializeThreadSanitizerPass(PassRegistry&);
-// dump name due to how the INITIALIZE_PASS macro works; change later
-void initializeOpenKimonoFunctionPassPass(PassRegistry&); // ANGE XXX
+void initializeCodeSpectatorInterfacePass(PassRegistry&);
 void initializeSanitizerCoverageModulePass(PassRegistry&);
 void initializeDataFlowSanitizerPass(PassRegistry&);
 void initializeScalarizerPass(PassRegistry&);
