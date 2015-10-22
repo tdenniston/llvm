@@ -71,12 +71,6 @@ char CodeSpectatorInterface::ID = 0;
 INITIALIZE_PASS(CodeSpectatorInterface, "CSI-func", "CodeSpectatorInterface function pass",
                 false, false)
 
-// XXX for now let's always register it; move it to commnad line option later
-/*
-static RegisterPass<CodeSpectatorInterface>
-CsiFunctonPass("csi-func", "CodeSpectatorInterface function pass", false, false);
-*/
-
 const char *CodeSpectatorInterface::getPassName() const {
   return "CodeSpectatorInterface";
 }
@@ -200,8 +194,10 @@ bool CodeSpectatorInterface::instrumentLoadOrStore(inst_iterator Iter,
         {IRB.CreatePointerCast(Addr, AddrType),
          IRB.getInt32(NumBytes),
          IRB.getInt32(0)}); // XXX: use 0 for attr for now; FIXME
-    // move pass the actual store instruction;
-    // the inserted instruction doesn't seem to count.
+
+    // The iterator currently points between the inserted instruction and the
+    // store instruction. We now want to insert an instruction after the store
+    // instruction.
     Iter++;
     IRB.SetInsertPoint(&*Iter);
 
@@ -209,7 +205,6 @@ bool CodeSpectatorInterface::instrumentLoadOrStore(inst_iterator Iter,
         errs() << "CSI_func: creating call to after store for "
                << NumBytes << " bytes\n");
     IRB.CreateCall(CsiAfterWrite,
-        // XXX: should I just use the pointer type with the right size?
         {IRB.CreatePointerCast(Addr, AddrType),
          IRB.getInt32(NumBytes),
          IRB.getInt32(0)});
@@ -223,12 +218,13 @@ bool CodeSpectatorInterface::instrumentLoadOrStore(inst_iterator Iter,
         errs() << "CSI_func: creating call to before load for "
                << NumBytes << " bytes and type " << LType << "\n");
     IRB.CreateCall(CsiBeforeRead,
-        // XXX: should I just use the pointer type with the right size?
         {IRB.CreatePointerCast(Addr, AddrType),
          IRB.getInt32(NumBytes),
          IRB.getInt32(0)});
-    // move pass the actual load instruction;
-    // the inserted instruction doesn't seem to count.
+
+    // The iterator currently points between the inserted instruction and the
+    // store instruction. We now want to insert an instruction after the store
+    // instruction.
     Iter++;
     IRB.SetInsertPoint(&*Iter);
 
@@ -236,7 +232,6 @@ bool CodeSpectatorInterface::instrumentLoadOrStore(inst_iterator Iter,
         errs() << "CSI_func: creating call to after load for "
                << NumBytes << " bytes\n");
     IRB.CreateCall(CsiAfterRead,
-        // XXX: should I just use the pointer type with the right size?
         {IRB.CreatePointerCast(Addr, AddrType),
          IRB.getInt32(NumBytes),
          IRB.getInt32(0)});
@@ -263,7 +258,7 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
 }
 
 bool CodeSpectatorInterface::runOnFunction(Function &F) {
-  // This is required to prevent instrumenting call to __csi_init from within
+  // This is required to prevent instrumenting the call to __csi_init from within
   // the module constructor.
   if (&F == CsiCtorFunction)
       return false;
@@ -286,11 +281,6 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
     } else if (isa<ReturnInst>(*I)) {
       RetVec.push_back(I);
     } else if (isa<CallInst>(*I) || isa<InvokeInst>(*I)) {
-      // DD: If we decide to track memset, memcpy, etc, we can uncomment the
-      // next two lines
-      // if (isa<MemIntrinsic>(I))
-        // MemIntrinCalls.push_back(&I);
-
       HasCalls = true;
     }
   }
