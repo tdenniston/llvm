@@ -46,10 +46,10 @@ GlobalVariable *collectUsedGlobalVariables(Module &M,
                                            bool CompilerUsed);
 
 // Validate the result of Module::getOrInsertFunction called for an interface
-// function of OpenKimono. If the instrumented module defines a function
+// function of CodeSpectatorInterface. If the instrumented module defines a function
 // with the same name, their prototypes must match, otherwise
 // getOrInsertFunction returns a bitcast.
-Function *checkOkInterfaceFunction(Constant *FuncOrBitcast);
+Function *checkCsiInterfaceFunction(Constant *FuncOrBitcast);
 
 // Validate the result of Module::getOrInsertFunction called for an interface
 // function of given sanitizer. If the instrumented module defines a function
