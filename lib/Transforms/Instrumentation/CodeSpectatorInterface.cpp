@@ -256,7 +256,7 @@ bool CodeSpectatorInterface::instrumentBasicBlock(BasicBlock &BB) {
   Type *IdType = IRB.getInt32Ty();
 
   Function *F = checkCsiInterfaceFunction(
-      M.getOrInsertFunction("__ok_bb_entry", RetType, IdType, AttrType, nullptr));
+      M.getOrInsertFunction("__csi_bb_entry", RetType, IdType, AttrType, nullptr));
   IRB.CreateCall(F, {IRB.getInt32(id++), IRB.getInt32(0)});
   ++NumInstrumentedBBs;
   return true;
