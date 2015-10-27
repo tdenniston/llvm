@@ -52,6 +52,8 @@ private:
   void initializeFuncCallbacks(Module &M);
   // actually insert the instrumentation call
   bool instrumentLoadOrStore(inst_iterator Iter, const DataLayout &DL);
+  // instrument a call to memmove, memcpy, or memset
+  void instrumentMemIntrinsic(inst_iterator I);
 
   Function *CsiCtorFunction;
 
@@ -62,6 +64,9 @@ private:
 
   Function *CsiFuncEntry;
   Function *CsiFuncExit;
+  Function *MemmoveFn, *MemcpyFn, *MemsetFn;
+
+  Type *IntptrTy;
 }; //struct CodeSpectatorInterface
 
 } //namespace
@@ -135,6 +140,15 @@ void CodeSpectatorInterface::initializeLoadStoreCallbacks(Module &M) {
       M.getOrInsertFunction("__csi_after_store", RetType,
                             AddrType, NumBytesType, AttrType, nullptr));
 
+  MemmoveFn = checkSanitizerInterfaceFunction(
+      M.getOrInsertFunction("memmove", IRB.getInt8PtrTy(), IRB.getInt8PtrTy(),
+                            IRB.getInt8PtrTy(), IntptrTy, nullptr));
+  MemcpyFn = checkSanitizerInterfaceFunction(
+      M.getOrInsertFunction("memcpy", IRB.getInt8PtrTy(), IRB.getInt8PtrTy(),
+                            IRB.getInt8PtrTy(), IntptrTy, nullptr));
+  MemsetFn = checkSanitizerInterfaceFunction(
+      M.getOrInsertFunction("memset", IRB.getInt8PtrTy(), IRB.getInt8PtrTy(),
+                            IRB.getInt32Ty(), IntptrTy, nullptr));
 }
 
 int CodeSpectatorInterface::getNumBytesAccessed(Value *Addr,
@@ -241,8 +255,38 @@ bool CodeSpectatorInterface::instrumentLoadOrStore(inst_iterator Iter,
   return true;
 }
 
+// If a memset intrinsic gets inlined by the code gen, we will miss races on it.
+// So, we either need to ensure the intrinsic is not inlined, or instrument it.
+// We do not instrument memset/memmove/memcpy intrinsics (too complicated),
+// instead we simply replace them with regular function calls, which are then
+// intercepted by the run-time.
+// Since our pass runs after everyone else, the calls should not be
+// replaced back with intrinsics. If that becomes wrong at some point,
+// we will need to call e.g. __csi_memset to avoid the intrinsics.
+void CodeSpectatorInterface::instrumentMemIntrinsic(inst_iterator Iter) {
+  Instruction *I = &(*Iter);
+  IRBuilder<> IRB(I);
+  if (MemSetInst *M = dyn_cast<MemSetInst>(I)) {
+    IRB.CreateCall(
+        MemsetFn,
+        {IRB.CreatePointerCast(M->getArgOperand(0), IRB.getInt8PtrTy()),
+         IRB.CreateIntCast(M->getArgOperand(1), IRB.getInt32Ty(), false),
+         IRB.CreateIntCast(M->getArgOperand(2), IntptrTy, false)});
+    I->eraseFromParent();
+  } else if (MemTransferInst *M = dyn_cast<MemTransferInst>(I)) {
+    IRB.CreateCall(
+        isa<MemCpyInst>(M) ? MemcpyFn : MemmoveFn,
+        {IRB.CreatePointerCast(M->getArgOperand(0), IRB.getInt8PtrTy()),
+         IRB.CreatePointerCast(M->getArgOperand(1), IRB.getInt8PtrTy()),
+         IRB.CreateIntCast(M->getArgOperand(2), IntptrTy, false)});
+    I->eraseFromParent();
+  }
+}
+
 bool CodeSpectatorInterface::doInitialization(Module &M) {
   DEBUG_WITH_TYPE("csi-func", errs() << "CSI_func: doInitialization" << "\n");
+
+  IntptrTy = M.getDataLayout().getIntPtrType(M.getContext());
 
   std::tie(CsiCtorFunction, std::ignore) = createSanitizerCtorAndInitFunctions(
       M, CsiModuleCtorName, CsiInitName, /*InitArgTypes=*/{},
@@ -253,7 +297,6 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
   initializeLoadStoreCallbacks(M);
   DEBUG_WITH_TYPE("csi-func",
       errs() << "CSI_func: doInitialization done" << "\n");
-
   return true;
 }
 
@@ -269,6 +312,7 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   SmallVector<Instruction*, 8> AllLoadsAndStores;
   SmallVector<Instruction*, 8> LocalLoadsAndStores;
   SmallVector<inst_iterator, 8> RetVec;
+  SmallVector<inst_iterator, 8> MemIntrinsics;
   bool Modified = false, HasCalls = false;
   const DataLayout &DL = F.getParent()->getDataLayout();
 
@@ -282,8 +326,16 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
       RetVec.push_back(I);
     } else if (isa<CallInst>(*I) || isa<InvokeInst>(*I)) {
       HasCalls = true;
+
+      if (isa<MemIntrinsic>(&(*I)))
+        MemIntrinsics.push_back(I);
     }
   }
+
+  // Do this work in a separate loop after copying the iterators so that we
+  // aren't modifying the list as we're iterating.
+  for (inst_iterator I : MemIntrinsics)
+      instrumentMemIntrinsic(I);
 
   // Instrument function entry/exit points if there were instrumented accesses.
   if (HasCalls || Modified) {
