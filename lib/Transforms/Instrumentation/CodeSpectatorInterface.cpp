@@ -405,6 +405,7 @@ bool CodeSpectatorInterfaceLT::runOnModule(Module &M) {
       assert(GV.hasInitializer());
       Constant *UniqueModuleId = ConstantInt::get(GV.getInitializer()->getType(), moduleId++);
       GV.setInitializer(UniqueModuleId);
+      modified = true;
     }
   }
   return modified;
