@@ -32,9 +32,9 @@ STATISTIC(NumAccessesWithBadSize, "Number of accesses with bad size");
 
 static const char *const CsiModuleCtorName = "csi.module_ctor";
 static const char *const CsiModuleInitName = "__csi_module_init";
-static const char *const CsiInitCtorName = "csi.init_ctor";
-static const char *const CsiInitName = "__csi_rt_init_program";
 static const char *const CsiModuleIdName = "__csi_module_id";
+static const char *const CsiInitCtorName = "csi.init_ctor";
+static const char *const CsiInitName = "__csi_init";
 
 namespace {
 
@@ -60,7 +60,7 @@ private:
 
   GlobalVariable *ModuleId;
 
-  Function *CsiCtorFunction, *CsiModuleCtorFunction;
+  Function *CsiModuleCtorFunction;
 
   Function *CsiBeforeRead;
   Function *CsiAfterRead;
@@ -298,12 +298,6 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
 
   IntptrTy = M.getDataLayout().getIntPtrType(M.getContext());
 
-  // Add call to tool init
-  std::tie(CsiCtorFunction, std::ignore) = createSanitizerCtorAndInitFunctions(
-      M, CsiInitCtorName, CsiInitName, /*InitArgTypes=*/{},
-      /*InitArgs=*/{});
-  appendToGlobalCtors(M, CsiCtorFunction, 0);
-
   IntegerType *ty = IntegerType::get(M.getContext(), 32);
 
   ModuleId = new GlobalVariable(M, ty, false, GlobalValue::InternalLinkage, ConstantInt::get(ty, 0), CsiModuleIdName);
@@ -316,11 +310,6 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
 }
 
 bool CodeSpectatorInterface::runOnFunction(Function &F) {
-  // This is required to prevent instrumenting the call to __csi_init from within
-  // the module constructor.
-  if (&F == CsiCtorFunction)
-      return false;
-
   DEBUG_WITH_TYPE("csi-func",
                   errs() << "CSI_func: run on function " << F.getName() << "\n");
 
@@ -392,6 +381,7 @@ struct CodeSpectatorInterfaceLT : public ModulePass {
 
 private:
   unsigned moduleId;
+  Function *CsiCtorFunction;
 }; //struct CodeSpectatorInterfaceLT
 
 } // namespace
@@ -409,14 +399,19 @@ const char *CodeSpectatorInterfaceLT::getPassName() const {
 }
 
 bool CodeSpectatorInterfaceLT::runOnModule(Module &M) {
-  bool modified = false;
   for (GlobalVariable &GV : M.getGlobalList()) {
     if (GV.hasName() && GV.getName().startswith(CsiModuleIdName)) {
       assert(GV.hasInitializer());
       Constant *UniqueModuleId = ConstantInt::get(GV.getInitializer()->getType(), moduleId++);
       GV.setInitializer(UniqueModuleId);
-      modified = true;
     }
   }
-  return modified;
+
+  // Add call to tool init
+  std::tie(CsiCtorFunction, std::ignore) = createSanitizerCtorAndInitFunctions(
+      M, CsiInitCtorName, CsiInitName, /*InitArgTypes=*/{},
+      /*InitArgs=*/{});
+  appendToGlobalCtors(M, CsiCtorFunction, 0);
+
+  return true;
 }
