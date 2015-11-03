@@ -293,8 +293,6 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
       /*InitArgs=*/{});
   appendToGlobalCtors(M, CsiCtorFunction, 0);
 
-  initializeFuncCallbacks(M);
-  initializeLoadStoreCallbacks(M);
   DEBUG_WITH_TYPE("csi-func",
       errs() << "CSI_func: doInitialization done" << "\n");
   return true;
@@ -305,6 +303,8 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   // the module constructor.
   if (&F == CsiCtorFunction)
       return false;
+  initializeFuncCallbacks(*F.getParent());
+  initializeLoadStoreCallbacks(*F.getParent());
 
   DEBUG_WITH_TYPE("csi-func",
                   errs() << "CSI_func: run on function " << F.getName() << "\n");
