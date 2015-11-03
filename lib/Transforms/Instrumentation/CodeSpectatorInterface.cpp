@@ -38,7 +38,7 @@ namespace {
 struct CodeSpectatorInterface : public FunctionPass {
   static char ID;
 
-  CodeSpectatorInterface() : FunctionPass(ID) {}
+  CodeSpectatorInterface() : FunctionPass(ID), CsiInitialized(false) {}
   const char *getPassName() const override;
   bool doInitialization(Module &M) override;
   bool runOnFunction(Function &F) override;
@@ -55,6 +55,7 @@ private:
   // instrument a call to memmove, memcpy, or memset
   void instrumentMemIntrinsic(inst_iterator I);
 
+  bool CsiInitialized;
   GlobalVariable *ModuleId;
 
   Function *CsiCtorFunction;
@@ -93,9 +94,9 @@ FunctionPass *llvm::createCodeSpectatorInterfacePass() {
  */
 void CodeSpectatorInterface::initializeFuncCallbacks(Module &M) {
   IRBuilder<> IRB(M.getContext());
-  CsiFuncEntry = checkSanitizerInterfaceFunction(M.getOrInsertFunction(
+  CsiFuncEntry = checkCsiInterfaceFunction(M.getOrInsertFunction(
       "__csi_func_entry", IRB.getVoidTy(), IRB.getInt8PtrTy(), IRB.getInt8PtrTy(), nullptr));
-  CsiFuncExit = checkSanitizerInterfaceFunction(
+  CsiFuncExit = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_func_exit", IRB.getVoidTy(), nullptr));
 }
 
@@ -132,7 +133,7 @@ void CodeSpectatorInterface::initializeLoadStoreCallbacks(Module &M) {
                             AddrType, NumBytesType, AttrType, nullptr));
 
   // void __csi_before_store(void *addr, int num_bytes, int attr);
-  CsiBeforeWrite = checkSanitizerInterfaceFunction(
+  CsiBeforeWrite = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_before_store", RetType,
                             AddrType, NumBytesType, AttrType, nullptr));
 
@@ -141,13 +142,13 @@ void CodeSpectatorInterface::initializeLoadStoreCallbacks(Module &M) {
       M.getOrInsertFunction("__csi_after_store", RetType,
                             AddrType, NumBytesType, AttrType, nullptr));
 
-  MemmoveFn = checkSanitizerInterfaceFunction(
+  MemmoveFn = checkCsiInterfaceFunction(
       M.getOrInsertFunction("memmove", IRB.getInt8PtrTy(), IRB.getInt8PtrTy(),
                             IRB.getInt8PtrTy(), IntptrTy, nullptr));
-  MemcpyFn = checkSanitizerInterfaceFunction(
+  MemcpyFn = checkCsiInterfaceFunction(
       M.getOrInsertFunction("memcpy", IRB.getInt8PtrTy(), IRB.getInt8PtrTy(),
                             IRB.getInt8PtrTy(), IntptrTy, nullptr));
-  MemsetFn = checkSanitizerInterfaceFunction(
+  MemsetFn = checkCsiInterfaceFunction(
       M.getOrInsertFunction("memset", IRB.getInt8PtrTy(), IRB.getInt8PtrTy(),
                             IRB.getInt32Ty(), IntptrTy, nullptr));
 }
@@ -294,12 +295,6 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
       /*InitArgs=*/{});
   appendToGlobalCtors(M, CsiCtorFunction, 0);
 
-  IntegerType *ty = IntegerType::get(M.getContext(), 32);
-
-  ModuleId = new GlobalVariable(M, ty, false, GlobalValue::InternalLinkage, ConstantInt::get(ty, 0), CsiModuleIdName);
-
-  initializeFuncCallbacks(M);
-  initializeLoadStoreCallbacks(M);
   DEBUG_WITH_TYPE("csi-func",
       errs() << "CSI_func: doInitialization done" << "\n");
   return true;
@@ -310,12 +305,18 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   // the module constructor.
   if (&F == CsiCtorFunction)
       return false;
+  if (!CsiInitialized) {
+    initializeFuncCallbacks(*F.getParent());
+    initializeLoadStoreCallbacks(*F.getParent());
+    IntegerType *ty = IntegerType::get(M.getContext(), 32);
+    ModuleId = new GlobalVariable(M, ty, false, GlobalValue::InternalLinkage, ConstantInt::get(ty, 0), CsiModuleIdName);
+    CsiInitialized = true;
+  }
 
   DEBUG_WITH_TYPE("csi-func",
                   errs() << "CSI_func: run on function " << F.getName() << "\n");
 
-  SmallVector<Instruction*, 8> AllLoadsAndStores;
-  SmallVector<Instruction*, 8> LocalLoadsAndStores;
+  SmallVector<inst_iterator, 8> MemoryAccesses;
   SmallVector<inst_iterator, 8> RetVec;
   SmallVector<inst_iterator, 8> MemIntrinsics;
   bool Modified = false, HasCalls = false;
@@ -326,7 +327,7 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   for (inst_iterator I = inst_begin(F); I != inst_end(F); ++I) {
     // We need the Instruction Iterator to modify the code
     if (isa<LoadInst>(*I) || isa<StoreInst>(*I)) {
-      Modified |= instrumentLoadOrStore(I, DL);
+      MemoryAccesses.push_back(I);
     } else if (isa<ReturnInst>(*I)) {
       RetVec.push_back(I);
     } else if (isa<CallInst>(*I) || isa<InvokeInst>(*I)) {
@@ -339,8 +340,11 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
 
   // Do this work in a separate loop after copying the iterators so that we
   // aren't modifying the list as we're iterating.
+  for (inst_iterator I : MemoryAccesses)
+    Modified |= instrumentLoadOrStore(I, DL);
+
   for (inst_iterator I : MemIntrinsics)
-      instrumentMemIntrinsic(I);
+    instrumentMemIntrinsic(I);
 
   // Instrument function entry/exit points if there were instrumented accesses.
   if (HasCalls || Modified) {
