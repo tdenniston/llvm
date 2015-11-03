@@ -41,7 +41,7 @@ namespace {
 struct CodeSpectatorInterface : public FunctionPass {
   static char ID;
 
-  CodeSpectatorInterface() : FunctionPass(ID), CsiInitialized(false) {}
+  CodeSpectatorInterface() : FunctionPass(ID), CsiInitialized(false), NextBasicBlockId(0) {}
   const char *getPassName() const override;
   bool doInitialization(Module &M) override;
   bool runOnFunction(Function &F) override;
@@ -53,14 +53,19 @@ private:
   void initializeLoadStoreCallbacks(Module &M);
   // initialize CSI instrumentation functions for function entry and exit
   void initializeFuncCallbacks(Module &M);
+  // Basic block entry and exit instrumentation
+  void initializeBasicBlockCallbacks(Module &M);
   // actually insert the instrumentation call
   bool instrumentLoadOrStore(inst_iterator Iter, const DataLayout &DL);
   // instrument a call to memmove, memcpy, or memset
   void instrumentMemIntrinsic(inst_iterator I);
+  bool instrumentBasicBlock(BasicBlock &BB);
+
+  uint64_t GetNextBasicBlockId();
 
   bool CsiInitialized;
   GlobalVariable *ModuleId;
-
+  uint64_t NextBasicBlockId;
   Function *CsiModuleCtorFunction;
 
   Function *CsiBeforeRead;
@@ -70,9 +75,11 @@ private:
 
   Function *CsiFuncEntry;
   Function *CsiFuncExit;
+  Function *CsiBBEntry, *CsiBBExit;
   Function *MemmoveFn, *MemcpyFn, *MemsetFn;
 
   Type *IntptrTy;
+  StructType *CsiIdType;
 }; //struct CodeSpectatorInterface
 } //namespace
 
@@ -101,6 +108,14 @@ void CodeSpectatorInterface::initializeFuncCallbacks(Module &M) {
       "__csi_func_entry", IRB.getVoidTy(), IRB.getInt8PtrTy(), IRB.getInt8PtrTy(), nullptr));
   CsiFuncExit = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_func_exit", IRB.getVoidTy(), nullptr));
+}
+
+void CodeSpectatorInterface::initializeBasicBlockCallbacks(Module &M) {
+  IRBuilder<> IRB(M.getContext());
+  CsiBBEntry = checkCsiInterfaceFunction(M.getOrInsertFunction(
+      "__csi_bb_entry", IRB.getVoidTy(), CsiIdType, nullptr));
+  CsiBBExit = checkCsiInterfaceFunction(
+      M.getOrInsertFunction("__csi_bb_exit", IRB.getVoidTy(), nullptr));
 }
 
 /**
@@ -288,6 +303,21 @@ void CodeSpectatorInterface::instrumentMemIntrinsic(inst_iterator Iter) {
   }
 }
 
+uint64_t CodeSpectatorInterface::GetNextBasicBlockId() {
+  return NextBasicBlockId++;
+}
+
+bool CodeSpectatorInterface::instrumentBasicBlock(BasicBlock &BB) {
+  IRBuilder<> IRB(BB.getFirstInsertionPt());
+  Value *Id = IRB.CreateInsertValue(UndefValue::get(CsiIdType), IRB.CreateLoad(ModuleId), 0);
+  Id = IRB.CreateInsertValue(Id, IRB.getInt64(GetNextBasicBlockId()), 1);
+  IRB.CreateCall(CsiBBEntry, {Id});
+  TerminatorInst *TI = BB.getTerminator();
+  IRB.SetInsertPoint(TI);
+  IRB.CreateCall(CsiBBExit, {});
+  return true;
+}
+
 bool CodeSpectatorInterface::doInitialization(Module &M) {
   DEBUG_WITH_TYPE("csi-func", errs() << "CSI_func: doInitialization" << "\n");
 
@@ -305,14 +335,19 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
 }
 
 bool CodeSpectatorInterface::runOnFunction(Function &F) {
-  // This is required to prevent instrumenting the call to __csi_init from within
-  // the module constructor.
-  if (&F == CsiCtorFunction)
+  // This is required to prevent instrumenting the call to
+  // __csi_module_init from within the module constructor.
+  if (&F == CsiModuleCtorFunction)
       return false;
   if (!CsiInitialized) {
-    initializeFuncCallbacks(*F.getParent());
-    initializeLoadStoreCallbacks(*F.getParent());
-    IntegerType *ty = IntegerType::get(M.getContext(), 32);
+    Module &M = *F.getParent();
+    LLVMContext &C = M.getContext();
+    CsiIdType = StructType::create({IntegerType::get(C, 32), IntegerType::get(C, 64)},
+                                "__csi_id_t");
+    initializeFuncCallbacks(M);
+    initializeLoadStoreCallbacks(M);
+    initializeBasicBlockCallbacks(M);
+    IntegerType *ty = IntegerType::get(C, 32);
     ModuleId = new GlobalVariable(M, ty, false, GlobalValue::InternalLinkage, ConstantInt::get(ty, 0), CsiModuleIdName);
     CsiInitialized = true;
   }
@@ -366,6 +401,10 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
     }
 
     Modified = true;
+  }
+
+  for (BasicBlock &BB : F) {
+    Modified |= instrumentBasicBlock(BB);
   }
 
   if(Modified) {
