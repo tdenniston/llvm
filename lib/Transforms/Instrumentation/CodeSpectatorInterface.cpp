@@ -34,6 +34,7 @@ static const char *const CsiModuleCtorName = "csi.module_ctor";
 static const char *const CsiModuleInitName = "__csi_module_init";
 static const char *const CsiInitCtorName = "csi.init_ctor";
 static const char *const CsiInitName = "__csi_rt_init_program";
+static const char *const CsiModuleIdName = "__csi_module_id";
 
 namespace {
 
@@ -54,6 +55,10 @@ private:
   void initializeFuncCallbacks(Module &M);
   // actually insert the instrumentation call
   bool instrumentLoadOrStore(inst_iterator Iter, const DataLayout &DL);
+  // instrument a call to memmove, memcpy, or memset
+  void instrumentMemIntrinsic(inst_iterator I);
+
+  GlobalVariable *ModuleId;
 
   Function *CsiCtorFunction, *CsiModuleCtorFunction;
 
@@ -64,8 +69,10 @@ private:
 
   Function *CsiFuncEntry;
   Function *CsiFuncExit;
-}; //struct CodeSpectatorInterface
+  Function *MemmoveFn, *MemcpyFn, *MemsetFn;
 
+  Type *IntptrTy;
+}; //struct CodeSpectatorInterface
 } //namespace
 
 // the address matters but not the init value
@@ -137,6 +144,15 @@ void CodeSpectatorInterface::initializeLoadStoreCallbacks(Module &M) {
       M.getOrInsertFunction("__csi_after_store", RetType,
                             AddrType, NumBytesType, AttrType, nullptr));
 
+  MemmoveFn = checkSanitizerInterfaceFunction(
+      M.getOrInsertFunction("memmove", IRB.getInt8PtrTy(), IRB.getInt8PtrTy(),
+                            IRB.getInt8PtrTy(), IntptrTy, nullptr));
+  MemcpyFn = checkSanitizerInterfaceFunction(
+      M.getOrInsertFunction("memcpy", IRB.getInt8PtrTy(), IRB.getInt8PtrTy(),
+                            IRB.getInt8PtrTy(), IntptrTy, nullptr));
+  MemsetFn = checkSanitizerInterfaceFunction(
+      M.getOrInsertFunction("memset", IRB.getInt8PtrTy(), IRB.getInt8PtrTy(),
+                            IRB.getInt32Ty(), IntptrTy, nullptr));
 }
 
 int CodeSpectatorInterface::getNumBytesAccessed(Value *Addr,
@@ -243,6 +259,34 @@ bool CodeSpectatorInterface::instrumentLoadOrStore(inst_iterator Iter,
   return true;
 }
 
+// If a memset intrinsic gets inlined by the code gen, we will miss races on it.
+// So, we either need to ensure the intrinsic is not inlined, or instrument it.
+// We do not instrument memset/memmove/memcpy intrinsics (too complicated),
+// instead we simply replace them with regular function calls, which are then
+// intercepted by the run-time.
+// Since our pass runs after everyone else, the calls should not be
+// replaced back with intrinsics. If that becomes wrong at some point,
+// we will need to call e.g. __csi_memset to avoid the intrinsics.
+void CodeSpectatorInterface::instrumentMemIntrinsic(inst_iterator Iter) {
+  Instruction *I = &(*Iter);
+  IRBuilder<> IRB(I);
+  if (MemSetInst *M = dyn_cast<MemSetInst>(I)) {
+    IRB.CreateCall(
+        MemsetFn,
+        {IRB.CreatePointerCast(M->getArgOperand(0), IRB.getInt8PtrTy()),
+         IRB.CreateIntCast(M->getArgOperand(1), IRB.getInt32Ty(), false),
+         IRB.CreateIntCast(M->getArgOperand(2), IntptrTy, false)});
+    I->eraseFromParent();
+  } else if (MemTransferInst *M = dyn_cast<MemTransferInst>(I)) {
+    IRB.CreateCall(
+        isa<MemCpyInst>(M) ? MemcpyFn : MemmoveFn,
+        {IRB.CreatePointerCast(M->getArgOperand(0), IRB.getInt8PtrTy()),
+         IRB.CreatePointerCast(M->getArgOperand(1), IRB.getInt8PtrTy()),
+         IRB.CreateIntCast(M->getArgOperand(2), IntptrTy, false)});
+    I->eraseFromParent();
+  }
+}
+
 bool CodeSpectatorInterface::doInitialization(Module &M) {
   DEBUG_WITH_TYPE("csi-func", errs() << "CSI_func: doInitialization" << "\n");
 
@@ -252,17 +296,22 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
       /*InitArgs=*/{});
   appendToGlobalCtors(M, CsiModuleCtorFunction, 0);
 
+  IntptrTy = M.getDataLayout().getIntPtrType(M.getContext());
+
   // Add call to tool init
   std::tie(CsiCtorFunction, std::ignore) = createSanitizerCtorAndInitFunctions(
       M, CsiInitCtorName, CsiInitName, /*InitArgTypes=*/{},
       /*InitArgs=*/{});
   appendToGlobalCtors(M, CsiCtorFunction, 0);
 
+  IntegerType *ty = IntegerType::get(M.getContext(), 32);
+
+  ModuleId = new GlobalVariable(M, ty, false, GlobalValue::InternalLinkage, ConstantInt::get(ty, 0), CsiModuleIdName);
+
   initializeFuncCallbacks(M);
   initializeLoadStoreCallbacks(M);
   DEBUG_WITH_TYPE("csi-func",
       errs() << "CSI_func: doInitialization done" << "\n");
-
   return true;
 }
 
@@ -278,6 +327,7 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   SmallVector<Instruction*, 8> AllLoadsAndStores;
   SmallVector<Instruction*, 8> LocalLoadsAndStores;
   SmallVector<inst_iterator, 8> RetVec;
+  SmallVector<inst_iterator, 8> MemIntrinsics;
   bool Modified = false, HasCalls = false;
   const DataLayout &DL = F.getParent()->getDataLayout();
 
@@ -291,8 +341,16 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
       RetVec.push_back(I);
     } else if (isa<CallInst>(*I) || isa<InvokeInst>(*I)) {
       HasCalls = true;
+
+      if (isa<MemIntrinsic>(&(*I)))
+        MemIntrinsics.push_back(I);
     }
   }
+
+  // Do this work in a separate loop after copying the iterators so that we
+  // aren't modifying the list as we're iterating.
+  for (inst_iterator I : MemIntrinsics)
+      instrumentMemIntrinsic(I);
 
   // Instrument function entry/exit points if there were instrumented accesses.
   if (HasCalls || Modified) {
@@ -317,4 +375,48 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
         errs() << "CSI_func: modified function " << F.getName() << "\n");
   }
   return Modified;
+}
+
+// End of compile-time pass
+// ------------------------------------------------------------------------
+// LTO (link-time) pass
+
+namespace {
+
+struct CodeSpectatorInterfaceLT : public ModulePass {
+  static char ID;
+
+  CodeSpectatorInterfaceLT() : ModulePass(ID), moduleId(0) {}
+  const char *getPassName() const override;
+  bool runOnModule(Module &M) override;
+
+private:
+  unsigned moduleId;
+}; //struct CodeSpectatorInterfaceLT
+
+} // namespace
+
+char CodeSpectatorInterfaceLT::ID = 0;
+INITIALIZE_PASS(CodeSpectatorInterfaceLT, "CSI-lt", "CodeSpectatorInterface link-time pass",
+                false, false)
+
+ModulePass *llvm::createCodeSpectatorInterfaceLTPass() {
+  return new CodeSpectatorInterfaceLT();
+}
+
+const char *CodeSpectatorInterfaceLT::getPassName() const {
+  return "CodeSpectatorInterfaceLT";
+}
+
+bool CodeSpectatorInterfaceLT::runOnModule(Module &M) {
+  bool modified = false;
+  for (GlobalVariable &GV : M.getGlobalList()) {
+    if (GV.hasName() && GV.getName().startswith(CsiModuleIdName)) {
+      assert(GV.hasInitializer());
+      Constant *UniqueModuleId = ConstantInt::get(GV.getInitializer()->getType(), moduleId++);
+      GV.setInitializer(UniqueModuleId);
+      modified = true;
+    }
+  }
+  return modified;
 }
