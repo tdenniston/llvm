@@ -80,6 +80,7 @@ private:
 
   Type *IntptrTy;
   StructType *CsiIdType;
+  StructType *CsiModuleInfoType;
 }; //struct CodeSpectatorInterface
 } //namespace
 
@@ -344,6 +345,8 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
     LLVMContext &C = M.getContext();
     CsiIdType = StructType::create({IntegerType::get(C, 32), IntegerType::get(C, 64)},
                                 "__csi_id_t");
+    CsiModuleInfoType = StructType::create({IntegerType::get(C, 64)},
+                                           "__csi_module_info_t");
     initializeFuncCallbacks(M);
     initializeLoadStoreCallbacks(M);
     initializeBasicBlockCallbacks(M);
@@ -447,6 +450,10 @@ const char *CodeSpectatorInterfaceLT::getPassName() const {
 }
 
 bool CodeSpectatorInterfaceLT::runOnModule(Module &M) {
+  LLVMContext &C = M.getContext();
+  StructType *CsiInfoType = StructType::create({IntegerType::get(C, 32)},
+                                               "__csi_info_t");
+
   for (GlobalVariable &GV : M.getGlobalList()) {
     if (GV.hasName() && GV.getName().startswith(CsiModuleIdName)) {
       assert(GV.hasInitializer());
@@ -456,11 +463,21 @@ bool CodeSpectatorInterfaceLT::runOnModule(Module &M) {
     }
   }
 
-  // Add call to tool init
-  std::tie(CsiCtorFunction, std::ignore) = createSanitizerCtorAndInitFunctions(
-      M, CsiInitCtorName, CsiInitName, /*InitArgTypes=*/{},
-      /*InitArgs=*/{});
-  appendToGlobalCtors(M, CsiCtorFunction, 0);
+  // Add call to whole-program/tool init function.
+  Function *Ctor = Function::Create(
+      FunctionType::get(Type::getVoidTy(M.getContext()), false),
+      GlobalValue::InternalLinkage, CsiInitCtorName, &M);
+  BasicBlock *CtorBB = BasicBlock::Create(M.getContext(), "", Ctor);
+  IRBuilder<> IRB(ReturnInst::Create(M.getContext(), CtorBB));
+
+  const uint32_t NumModules = moduleId;
+  SmallVector<Type *, 4> InitArgTypes({CsiInfoType});
+  SmallVector<Value *, 4> InitArgs({ConstantStruct::get(CsiInfoType, {IRB.getInt32(NumModules)})});
+
+  Constant *InitFunction = M.getOrInsertFunction(CsiInitName, FunctionType::get(IRB.getVoidTy(), InitArgTypes, false));
+  IRB.CreateCall(InitFunction, InitArgs);
+
+  appendToGlobalCtors(M, Ctor, 0);
 
   return true;
 }
