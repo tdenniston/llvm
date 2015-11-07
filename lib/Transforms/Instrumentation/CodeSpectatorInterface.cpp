@@ -322,19 +322,31 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
   DEBUG_WITH_TYPE("csi-func", errs() << "CSI_func: doInitialization" << "\n");
 
   uint64_t NumBasicBlocks = 0;
-  IntegerType *Int64Ty = IntegerType::get(M.getContext(), 64);
-  StructType *CsiModuleInfoType = StructType::create({Int64Ty}, "__csi_module_info_t");
-
   for (Function &F : M) {
       NumBasicBlocks += F.size();
   }
 
   // Add call to module init
-  std::tie(CsiModuleCtorFunction, std::ignore) = createSanitizerCtorAndInitFunctions(
-      M, CsiModuleCtorName, CsiModuleInitName,
-      /*InitArgTypes=*/{CsiModuleInfoType},
-      /*InitArgs=*/{ConstantStruct::get(CsiModuleInfoType, {ConstantInt::get(Int64Ty, NumBasicBlocks)})});
-  appendToGlobalCtors(M, CsiModuleCtorFunction, 0);
+  IntegerType *Int32Ty = IntegerType::get(M.getContext(), 32),
+      *Int64Ty = IntegerType::get(M.getContext(), 64);
+  StructType *CsiModuleInfoType = StructType::create({Int32Ty, Int64Ty}, "__csi_module_info_t");
+
+  Function *Ctor = Function::Create(
+      FunctionType::get(Type::getVoidTy(M.getContext()), false),
+      GlobalValue::InternalLinkage, CsiModuleCtorName, &M);
+  BasicBlock *CtorBB = BasicBlock::Create(M.getContext(), "", Ctor);
+  IRBuilder<> IRB(ReturnInst::Create(M.getContext(), CtorBB));
+
+  SmallVector<Type *, 4> InitArgTypes({CsiModuleInfoType});
+  Value *ModId = new GlobalVariable(M, Int32Ty, false, GlobalValue::InternalLinkage, ConstantInt::get(Int32Ty, 0), CsiModuleIdName);
+  Constant *InitFunction = M.getOrInsertFunction(CsiModuleInitName, FunctionType::get(IRB.getVoidTy(), InitArgTypes, false));
+  assert(InitFunction);
+
+  Value *Info = IRB.CreateInsertValue(UndefValue::get(CsiModuleInfoType), IRB.CreateLoad(ModId), 0);
+  Info = IRB.CreateInsertValue(Info, IRB.getInt64(NumBasicBlocks), 1);
+  IRB.CreateCall(InitFunction, {Info});
+
+  appendToGlobalCtors(M, Ctor, 0);
 
   IntptrTy = M.getDataLayout().getIntPtrType(M.getContext());
 
@@ -351,14 +363,18 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   if (!CsiInitialized) {
     Module &M = *F.getParent();
     LLVMContext &C = M.getContext();
-    CsiIdType = StructType::create({IntegerType::get(C, 32), IntegerType::get(C, 64)},
-                                "__csi_id_t");
+    IntegerType *Int32Ty = IntegerType::get(C, 32),
+        *Int64Ty = IntegerType::get(C, 64);
+
+    CsiIdType = StructType::create({Int32Ty, Int64Ty}, "__csi_id_t");
     initializeFuncCallbacks(M);
     initializeLoadStoreCallbacks(M);
     initializeBasicBlockCallbacks(M);
-    IntegerType *ty = IntegerType::get(C, 32);
-    ModuleId = new GlobalVariable(M, ty, false, GlobalValue::InternalLinkage, ConstantInt::get(ty, 0), CsiModuleIdName);
+
+    ModuleId = new GlobalVariable(M, Int32Ty, false, GlobalValue::InternalLinkage, ConstantInt::get(Int32Ty, 0), CsiModuleIdName);
+
     CsiInitialized = true;
+
   }
 
   DEBUG_WITH_TYPE("csi-func",
@@ -481,6 +497,7 @@ bool CodeSpectatorInterfaceLT::runOnModule(Module &M) {
   SmallVector<Value *, 4> InitArgs({ConstantStruct::get(CsiInfoType, {IRB.getInt32(NumModules)})});
 
   Constant *InitFunction = M.getOrInsertFunction(CsiInitName, FunctionType::get(IRB.getVoidTy(), InitArgTypes, false));
+  assert(InitFunction);
   IRB.CreateCall(InitFunction, InitArgs);
 
   appendToGlobalCtors(M, Ctor, 0);
