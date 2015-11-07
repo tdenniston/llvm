@@ -322,10 +322,17 @@ bool CodeSpectatorInterface::instrumentBasicBlock(BasicBlock &BB) {
 bool CodeSpectatorInterface::doInitialization(Module &M) {
   DEBUG_WITH_TYPE("csi-func", errs() << "CSI_func: doInitialization" << "\n");
 
+  uint64_t NumBasicBlocks = 0;
+  IntegerType *Int64Ty = IntegerType::get(M.getContext(), 64);
+  for (Function &F : M) {
+      NumBasicBlocks += F.size();
+  }
+
   // Add call to module init
   std::tie(CsiModuleCtorFunction, std::ignore) = createSanitizerCtorAndInitFunctions(
-      M, CsiModuleCtorName, CsiModuleInitName, /*InitArgTypes=*/{},
-      /*InitArgs=*/{});
+      M, CsiModuleCtorName, CsiModuleInitName,
+      /*InitArgTypes=*/{Int64Ty},
+      /*InitArgs=*/{ConstantInt::get(Int64Ty, NumBasicBlocks)});
   appendToGlobalCtors(M, CsiModuleCtorFunction, 0);
 
   IntptrTy = M.getDataLayout().getIntPtrType(M.getContext());
