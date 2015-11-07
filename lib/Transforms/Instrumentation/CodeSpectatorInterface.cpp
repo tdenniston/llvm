@@ -358,8 +358,8 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
 bool CodeSpectatorInterface::runOnFunction(Function &F) {
   // This is required to prevent instrumenting the call to
   // __csi_module_init from within the module constructor.
-  if (&F == CsiModuleCtorFunction)
-      return false;
+  if (F.hasName() && F.getName() == CsiModuleCtorName)
+    return false;
   if (!CsiInitialized) {
     Module &M = *F.getParent();
     LLVMContext &C = M.getContext();
