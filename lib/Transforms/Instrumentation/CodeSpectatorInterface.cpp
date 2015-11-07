@@ -80,7 +80,6 @@ private:
 
   Type *IntptrTy;
   StructType *CsiIdType;
-  StructType *CsiModuleInfoType;
 }; //struct CodeSpectatorInterface
 } //namespace
 
@@ -324,6 +323,8 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
 
   uint64_t NumBasicBlocks = 0;
   IntegerType *Int64Ty = IntegerType::get(M.getContext(), 64);
+  StructType *CsiModuleInfoType = StructType::create({Int64Ty}, "__csi_module_info_t");
+
   for (Function &F : M) {
       NumBasicBlocks += F.size();
   }
@@ -331,8 +332,8 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
   // Add call to module init
   std::tie(CsiModuleCtorFunction, std::ignore) = createSanitizerCtorAndInitFunctions(
       M, CsiModuleCtorName, CsiModuleInitName,
-      /*InitArgTypes=*/{Int64Ty},
-      /*InitArgs=*/{ConstantInt::get(Int64Ty, NumBasicBlocks)});
+      /*InitArgTypes=*/{CsiModuleInfoType},
+      /*InitArgs=*/{ConstantStruct::get(CsiModuleInfoType, {ConstantInt::get(Int64Ty, NumBasicBlocks)})});
   appendToGlobalCtors(M, CsiModuleCtorFunction, 0);
 
   IntptrTy = M.getDataLayout().getIntPtrType(M.getContext());
@@ -352,8 +353,6 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
     LLVMContext &C = M.getContext();
     CsiIdType = StructType::create({IntegerType::get(C, 32), IntegerType::get(C, 64)},
                                 "__csi_id_t");
-    CsiModuleInfoType = StructType::create({IntegerType::get(C, 64)},
-                                           "__csi_module_info_t");
     initializeFuncCallbacks(M);
     initializeLoadStoreCallbacks(M);
     initializeBasicBlockCallbacks(M);
