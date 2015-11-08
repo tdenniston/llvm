@@ -35,6 +35,9 @@ static const char *const CsiModuleInitName = "__csi_module_init";
 static const char *const CsiModuleIdName = "__csi_module_id";
 static const char *const CsiInitCtorName = "csi.init_ctor";
 static const char *const CsiInitName = "__csi_init";
+// See llvm/tools/clang/lib/CodeGen/CodeGenModule.h:
+static const int CsiModuleCtorPriority = 65535,
+    CsiInitCtorPriority = 65534;
 
 namespace {
 
@@ -346,7 +349,7 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
   Info = IRB.CreateInsertValue(Info, IRB.getInt64(NumBasicBlocks), 1);
   IRB.CreateCall(InitFunction, {Info});
 
-  appendToGlobalCtors(M, Ctor, 0);
+  appendToGlobalCtors(M, Ctor, CsiModuleCtorPriority);
 
   IntptrTy = M.getDataLayout().getIntPtrType(M.getContext());
 
@@ -500,7 +503,9 @@ bool CodeSpectatorInterfaceLT::runOnModule(Module &M) {
   assert(InitFunction);
   IRB.CreateCall(InitFunction, InitArgs);
 
-  appendToGlobalCtors(M, Ctor, 0);
+  // Ensure whole-program init is called before module init.
+  // TODO: do all targets support this?
+  appendToGlobalCtors(M, Ctor, CsiInitCtorPriority);
 
   return true;
 }
