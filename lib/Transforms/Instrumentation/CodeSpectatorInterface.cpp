@@ -2,6 +2,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringExtras.h" // for itostr function
+#include "llvm/Analysis/CallGraph.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -48,6 +49,8 @@ struct CodeSpectatorInterface : public FunctionPass {
   const char *getPassName() const override;
   bool doInitialization(Module &M) override;
   bool runOnFunction(Function &F) override;
+  void getAnalysisUsage(AnalysisUsage &AU) const override;
+
   // not overriding doFinalization
 
 private:
@@ -63,9 +66,12 @@ private:
   // instrument a call to memmove, memcpy, or memset
   void instrumentMemIntrinsic(inst_iterator I);
   bool instrumentBasicBlock(BasicBlock &BB);
+  bool FunctionCallsFunction(Function *F, Function *G);
+  bool ShouldNotInstrumentFunction(Function &F);
 
   uint64_t GetNextBasicBlockId();
 
+  CallGraph *CG;
   bool CsiInitialized;
   GlobalVariable *ModuleId;
   uint64_t NextBasicBlockId;
@@ -358,11 +364,67 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
   return true;
 }
 
+void CodeSpectatorInterface::getAnalysisUsage(AnalysisUsage &AU) const {
+  AU.setPreservesAll();
+  AU.addRequired<CallGraphWrapperPass>();
+}
+
+// Recursively determine if F calls G. Return true if so. Conservatively, if F makes
+// any internal indirect function calls, assume it calls G.
+bool CodeSpectatorInterface::FunctionCallsFunction(Function *F, Function *G) {
+  assert(F && G && CG);
+  CallGraphNode *CGN = (*CG)[F];
+  // Assume external functions cannot make calls to internal functions.
+  if (!F->hasLocalLinkage() && G->hasLocalLinkage()) return false;
+  // Assume function declarations won't make calls to internal
+  // functions. TODO: This may not be correct in general.
+  if (F->isDeclaration()) return false;
+  for (CallGraphNode::iterator it = CGN->begin(), ite = CGN->end(); it != ite; ++it) {
+    Function *Called = it->second->getFunction();
+    if (Called == NULL) {
+      // Indirect call
+      return true;
+    } else if (Called == G) {
+      return true;
+    } else if (G->hasLocalLinkage() && !Called->hasLocalLinkage()) {
+      // Assume external functions cannot make calls to internal functions.
+      continue;
+    }
+  }
+  for (CallGraphNode::iterator it = CGN->begin(), ite = CGN->end(); it != ite; ++it) {
+    Function *Called = it->second->getFunction();
+    if (FunctionCallsFunction(Called, G)) return true;
+  }
+  return false;
+}
+
+bool CodeSpectatorInterface::ShouldNotInstrumentFunction(Function &F) {
+    Module &M = *F.getParent();
+    if (F.hasName() && F.getName() == CsiModuleCtorName) {
+        return true;
+    }
+    // Don't instrument functions that will run before or
+    // simultaneously with CSI ctors.
+    GlobalVariable *GV = M.getGlobalVariable("llvm.global_ctors");
+    ConstantArray *CA = cast<ConstantArray>(GV->getInitializer());
+    for (Use &OP : CA->operands()) {
+        if (isa<ConstantAggregateZero>(OP)) continue;
+        ConstantStruct *CS = cast<ConstantStruct>(OP);
+
+        if (Function *CF = dyn_cast<Function>(CS->getOperand(1))) {
+            uint64_t Priority = dyn_cast<ConstantInt>(CS->getOperand(0))->getLimitedValue();
+            if (Priority <= CsiModuleCtorPriority) {
+                return CF->getName() == F.getName() ||  FunctionCallsFunction(CF, &F);
+            }
+        }
+    }
+    // false means do instrument it.
+    return false;
+}
+
 bool CodeSpectatorInterface::runOnFunction(Function &F) {
   // This is required to prevent instrumenting the call to
   // __csi_module_init from within the module constructor.
-  if (F.hasName() && F.getName() == CsiModuleCtorName)
-    return false;
   if (!CsiInitialized) {
     Module &M = *F.getParent();
     LLVMContext &C = M.getContext();
@@ -377,9 +439,13 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
     ModuleId = M.getNamedGlobal(CsiModuleIdName);
     assert(ModuleId);
 
+    CG = &getAnalysis<CallGraphWrapperPass>().getCallGraph();
+
     CsiInitialized = true;
   }
 
+  if (ShouldNotInstrumentFunction(F)) {
+      return false;
   }
 
   DEBUG_WITH_TYPE("csi-func",
