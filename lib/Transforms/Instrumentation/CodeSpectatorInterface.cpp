@@ -341,11 +341,11 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
   IRBuilder<> IRB(ReturnInst::Create(M.getContext(), CtorBB));
 
   SmallVector<Type *, 4> InitArgTypes({CsiModuleInfoType});
-  Value *ModId = new GlobalVariable(M, Int32Ty, false, GlobalValue::InternalLinkage, ConstantInt::get(Int32Ty, 0), CsiModuleIdName);
+  ModuleId = new GlobalVariable(M, Int32Ty, false, GlobalValue::InternalLinkage, ConstantInt::get(Int32Ty, 0), CsiModuleIdName);
   Constant *InitFunction = M.getOrInsertFunction(CsiModuleInitName, FunctionType::get(IRB.getVoidTy(), InitArgTypes, false));
   assert(InitFunction);
 
-  Value *Info = IRB.CreateInsertValue(UndefValue::get(CsiModuleInfoType), IRB.CreateLoad(ModId), 0);
+  Value *Info = IRB.CreateInsertValue(UndefValue::get(CsiModuleInfoType), IRB.CreateLoad(ModuleId), 0);
   Info = IRB.CreateInsertValue(Info, IRB.getInt64(NumBasicBlocks), 1);
   IRB.CreateCall(InitFunction, {Info});
 
@@ -374,9 +374,11 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
     initializeLoadStoreCallbacks(M);
     initializeBasicBlockCallbacks(M);
 
-    ModuleId = new GlobalVariable(M, Int32Ty, false, GlobalValue::InternalLinkage, ConstantInt::get(Int32Ty, 0), CsiModuleIdName);
+    ModuleId = M.getNamedGlobal(CsiModuleIdName);
+    assert(ModuleId);
 
     CsiInitialized = true;
+  }
 
   }
 
