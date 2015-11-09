@@ -68,7 +68,7 @@ private:
   bool instrumentBasicBlock(BasicBlock &BB);
   bool FunctionCallsFunction(Function *F, Function *G);
   bool ShouldNotInstrumentFunction(Function &F);
-
+  void InitializeCsi(Module &M);
   uint64_t GetNextBasicBlockId();
 
   CallGraph *CG;
@@ -337,6 +337,48 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
   return true;
 }
 
+void CodeSpectatorInterface::InitializeCsi(Module &M) {
+  LLVMContext &C = M.getContext();
+  IntegerType *Int32Ty = IntegerType::get(C, 32), *Int64Ty = IntegerType::get(C, 64);
+
+  CsiIdType = StructType::create({Int32Ty, Int64Ty}, "__csi_id_t");
+  ModuleId = new GlobalVariable(M, Int32Ty, false, GlobalValue::InternalLinkage, ConstantInt::get(Int32Ty, 0), CsiModuleIdName);
+  assert(ModuleId);
+
+  initializeFuncCallbacks(M);
+  initializeLoadStoreCallbacks(M);
+  initializeBasicBlockCallbacks(M);
+
+  // Add CSI global constructor, which calls module init.
+  Function *Ctor = Function::Create(
+      FunctionType::get(Type::getVoidTy(M.getContext()), false),
+      GlobalValue::InternalLinkage, CsiModuleCtorName, &M);
+  BasicBlock *CtorBB = BasicBlock::Create(M.getContext(), "", Ctor);
+  IRBuilder<> IRB(ReturnInst::Create(M.getContext(), CtorBB));
+
+  StructType *CsiModuleInfoType = StructType::create({Int32Ty, Int64Ty}, "__csi_module_info_t");
+  SmallVector<Type *, 4> InitArgTypes({CsiModuleInfoType});
+  Function *InitFunction = dyn_cast<Function>(M.getOrInsertFunction(CsiModuleInitName, FunctionType::get(IRB.getVoidTy(), InitArgTypes, false)));
+  assert(InitFunction);
+
+  uint64_t NumBasicBlocks = 0;
+  for (Function &F : M) {
+    NumBasicBlocks += F.size();
+  }
+  Value *Info = IRB.CreateInsertValue(UndefValue::get(CsiModuleInfoType), IRB.CreateLoad(ModuleId), 0);
+  Info = IRB.CreateInsertValue(Info, IRB.getInt64(NumBasicBlocks), 1);
+  CallInst *Call = IRB.CreateCall(InitFunction, {Info});
+
+  appendToGlobalCtors(M, Ctor, CsiModuleCtorPriority);
+
+  CG = &getAnalysis<CallGraphWrapperPass>().getCallGraph();
+  CallGraphNode *CNCtor = CG->getOrInsertFunction(Ctor);
+  CallGraphNode *CNFunc = CG->getOrInsertFunction(InitFunction);
+  CNCtor->addCalledFunction(Call, CNFunc);
+
+  CsiInitialized = true;
+}
+
 void CodeSpectatorInterface::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequired<CallGraphWrapperPass>();
 }
@@ -399,48 +441,7 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   // __csi_module_init from within the module constructor.
   if (!CsiInitialized) {
     Module &M = *F.getParent();
-    LLVMContext &C = M.getContext();
-    IntegerType *Int32Ty = IntegerType::get(C, 32),
-        *Int64Ty = IntegerType::get(C, 64);
-
-    CsiIdType = StructType::create({Int32Ty, Int64Ty}, "__csi_id_t");
-    initializeFuncCallbacks(M);
-    initializeLoadStoreCallbacks(M);
-    initializeBasicBlockCallbacks(M);
-
-    ModuleId = new GlobalVariable(M, Int32Ty, false, GlobalValue::InternalLinkage, ConstantInt::get(Int32Ty, 0), CsiModuleIdName);
-    assert(ModuleId);
-
-    uint64_t NumBasicBlocks = 0;
-    for (Function &F : M) {
-        NumBasicBlocks += F.size();
-    }
-
-    // Add call to module init
-    Function *Ctor = Function::Create(
-        FunctionType::get(Type::getVoidTy(M.getContext()), false),
-        GlobalValue::InternalLinkage, CsiModuleCtorName, &M);
-    BasicBlock *CtorBB = BasicBlock::Create(M.getContext(), "", Ctor);
-    IRBuilder<> IRB(ReturnInst::Create(M.getContext(), CtorBB));
-
-    StructType *CsiModuleInfoType = StructType::create({Int32Ty, Int64Ty}, "__csi_module_info_t");
-    SmallVector<Type *, 4> InitArgTypes({CsiModuleInfoType});
-    Function *InitFunction = dyn_cast<Function>(M.getOrInsertFunction(CsiModuleInitName, FunctionType::get(IRB.getVoidTy(), InitArgTypes, false)));
-    assert(InitFunction);
-
-    Value *Info = IRB.CreateInsertValue(UndefValue::get(CsiModuleInfoType), IRB.CreateLoad(ModuleId), 0);
-    Info = IRB.CreateInsertValue(Info, IRB.getInt64(NumBasicBlocks), 1);
-    CallInst *Call = IRB.CreateCall(InitFunction, {Info});
-
-    appendToGlobalCtors(M, Ctor, CsiModuleCtorPriority);
-
-    CG = &getAnalysis<CallGraphWrapperPass>().getCallGraph();
-
-    CallGraphNode *CNCtor = CG->getOrInsertFunction(Ctor);
-    CallGraphNode *CNFunc = CG->getOrInsertFunction(InitFunction);
-    CNCtor->addCalledFunction(Call, CNFunc);
-
-    CsiInitialized = true;
+    InitializeCsi(M);
   }
 
   if (ShouldNotInstrumentFunction(F)) {
