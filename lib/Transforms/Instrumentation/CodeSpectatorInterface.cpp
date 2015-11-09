@@ -458,7 +458,7 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   SmallVector<inst_iterator, 8> MemoryAccesses;
   SmallVector<inst_iterator, 8> RetVec;
   SmallVector<inst_iterator, 8> MemIntrinsics;
-  bool Modified = false, HasCalls = false;
+  bool Modified = false;
   const DataLayout &DL = F.getParent()->getDataLayout();
 
   // Traverse all instructions in a function and insert instrumentation
@@ -470,8 +470,6 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
     } else if (isa<ReturnInst>(*I)) {
       RetVec.push_back(I);
     } else if (isa<CallInst>(*I) || isa<InvokeInst>(*I)) {
-      HasCalls = true;
-
       if (isa<MemIntrinsic>(&(*I)))
         MemIntrinsics.push_back(I);
     }
@@ -485,24 +483,22 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   for (inst_iterator I : MemIntrinsics)
     instrumentMemIntrinsic(I);
 
-  // Instrument function entry/exit points if there were instrumented accesses.
-  if (HasCalls || Modified) {
-    IRBuilder<> IRB(F.getEntryBlock().getFirstNonPHI());
-    Value *FunctionName = IRB.CreateGlobalStringPtr(F.getName());
-    Value *ReturnAddress = IRB.CreateCall(
+  // Instrument function entry/exit points.
+  IRBuilder<> IRB(F.getEntryBlock().getFirstInsertionPt());
+  Value *FunctionName = IRB.CreateGlobalStringPtr(F.getName());
+  Value *ReturnAddress = IRB.CreateCall(
         Intrinsic::getDeclaration(F.getParent(), Intrinsic::returnaddress),
         IRB.getInt32(0));
-    IRB.CreateCall(CsiFuncEntry, {ReturnAddress, FunctionName});
+  IRB.CreateCall(CsiFuncEntry, {ReturnAddress, FunctionName});
 
-    for (inst_iterator I : RetVec) {
+  for (inst_iterator I : RetVec) {
       Instruction *RetInst = &(*I);
       IRBuilder<> IRBRet(RetInst);
       IRBRet.CreateCall(CsiFuncExit, {});
-    }
-
-    Modified = true;
   }
+  Modified = true;
 
+  // Instrument basic blocks
   for (BasicBlock &BB : F) {
     Modified |= instrumentBasicBlock(BB);
   }
