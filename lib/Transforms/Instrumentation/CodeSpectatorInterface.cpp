@@ -349,6 +349,14 @@ void CodeSpectatorInterface::InitializeCsi(Module &M) {
   initializeLoadStoreCallbacks(M);
   initializeBasicBlockCallbacks(M);
 
+  CG = &getAnalysis<CallGraphWrapperPass>().getCallGraph();
+
+  uint64_t NumBasicBlocks = 0;
+  for (Function &F : M) {
+    if (ShouldNotInstrumentFunction(F)) continue;
+    NumBasicBlocks += F.size();
+  }
+
   // Add CSI global constructor, which calls module init.
   Function *Ctor = Function::Create(
       FunctionType::get(Type::getVoidTy(M.getContext()), false),
@@ -361,17 +369,12 @@ void CodeSpectatorInterface::InitializeCsi(Module &M) {
   Function *InitFunction = dyn_cast<Function>(M.getOrInsertFunction(CsiModuleInitName, FunctionType::get(IRB.getVoidTy(), InitArgTypes, false)));
   assert(InitFunction);
 
-  uint64_t NumBasicBlocks = 0;
-  for (Function &F : M) {
-    NumBasicBlocks += F.size();
-  }
   Value *Info = IRB.CreateInsertValue(UndefValue::get(CsiModuleInfoType), IRB.CreateLoad(ModuleId), 0);
   Info = IRB.CreateInsertValue(Info, IRB.getInt64(NumBasicBlocks), 1);
   CallInst *Call = IRB.CreateCall(InitFunction, {Info});
 
   appendToGlobalCtors(M, Ctor, CsiModuleCtorPriority);
 
-  CG = &getAnalysis<CallGraphWrapperPass>().getCallGraph();
   CallGraphNode *CNCtor = CG->getOrInsertFunction(Ctor);
   CallGraphNode *CNFunc = CG->getOrInsertFunction(InitFunction);
   CNCtor->addCalledFunction(Call, CNFunc);
@@ -420,6 +423,7 @@ bool CodeSpectatorInterface::ShouldNotInstrumentFunction(Function &F) {
     // Don't instrument functions that will run before or
     // simultaneously with CSI ctors.
     GlobalVariable *GV = M.getGlobalVariable("llvm.global_ctors");
+    if (GV == nullptr) return false;
     ConstantArray *CA = cast<ConstantArray>(GV->getInitializer());
     for (Use &OP : CA->operands()) {
         if (isa<ConstantAggregateZero>(OP)) continue;
