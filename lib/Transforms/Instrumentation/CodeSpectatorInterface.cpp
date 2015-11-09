@@ -330,33 +330,6 @@ bool CodeSpectatorInterface::instrumentBasicBlock(BasicBlock &BB) {
 bool CodeSpectatorInterface::doInitialization(Module &M) {
   DEBUG_WITH_TYPE("csi-func", errs() << "CSI_func: doInitialization" << "\n");
 
-  uint64_t NumBasicBlocks = 0;
-  for (Function &F : M) {
-      NumBasicBlocks += F.size();
-  }
-
-  // Add call to module init
-  IntegerType *Int32Ty = IntegerType::get(M.getContext(), 32),
-      *Int64Ty = IntegerType::get(M.getContext(), 64);
-  StructType *CsiModuleInfoType = StructType::create({Int32Ty, Int64Ty}, "__csi_module_info_t");
-
-  Function *Ctor = Function::Create(
-      FunctionType::get(Type::getVoidTy(M.getContext()), false),
-      GlobalValue::InternalLinkage, CsiModuleCtorName, &M);
-  BasicBlock *CtorBB = BasicBlock::Create(M.getContext(), "", Ctor);
-  IRBuilder<> IRB(ReturnInst::Create(M.getContext(), CtorBB));
-
-  SmallVector<Type *, 4> InitArgTypes({CsiModuleInfoType});
-  ModuleId = new GlobalVariable(M, Int32Ty, false, GlobalValue::InternalLinkage, ConstantInt::get(Int32Ty, 0), CsiModuleIdName);
-  Constant *InitFunction = M.getOrInsertFunction(CsiModuleInitName, FunctionType::get(IRB.getVoidTy(), InitArgTypes, false));
-  assert(InitFunction);
-
-  Value *Info = IRB.CreateInsertValue(UndefValue::get(CsiModuleInfoType), IRB.CreateLoad(ModuleId), 0);
-  Info = IRB.CreateInsertValue(Info, IRB.getInt64(NumBasicBlocks), 1);
-  IRB.CreateCall(InitFunction, {Info});
-
-  appendToGlobalCtors(M, Ctor, CsiModuleCtorPriority);
-
   IntptrTy = M.getDataLayout().getIntPtrType(M.getContext());
 
   DEBUG_WITH_TYPE("csi-func",
@@ -365,7 +338,6 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
 }
 
 void CodeSpectatorInterface::getAnalysisUsage(AnalysisUsage &AU) const {
-  AU.setPreservesAll();
   AU.addRequired<CallGraphWrapperPass>();
 }
 
@@ -436,10 +408,37 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
     initializeLoadStoreCallbacks(M);
     initializeBasicBlockCallbacks(M);
 
-    ModuleId = M.getNamedGlobal(CsiModuleIdName);
+    ModuleId = new GlobalVariable(M, Int32Ty, false, GlobalValue::InternalLinkage, ConstantInt::get(Int32Ty, 0), CsiModuleIdName);
     assert(ModuleId);
 
+    uint64_t NumBasicBlocks = 0;
+    for (Function &F : M) {
+        NumBasicBlocks += F.size();
+    }
+
+    // Add call to module init
+    Function *Ctor = Function::Create(
+        FunctionType::get(Type::getVoidTy(M.getContext()), false),
+        GlobalValue::InternalLinkage, CsiModuleCtorName, &M);
+    BasicBlock *CtorBB = BasicBlock::Create(M.getContext(), "", Ctor);
+    IRBuilder<> IRB(ReturnInst::Create(M.getContext(), CtorBB));
+
+    StructType *CsiModuleInfoType = StructType::create({Int32Ty, Int64Ty}, "__csi_module_info_t");
+    SmallVector<Type *, 4> InitArgTypes({CsiModuleInfoType});
+    Function *InitFunction = dyn_cast<Function>(M.getOrInsertFunction(CsiModuleInitName, FunctionType::get(IRB.getVoidTy(), InitArgTypes, false)));
+    assert(InitFunction);
+
+    Value *Info = IRB.CreateInsertValue(UndefValue::get(CsiModuleInfoType), IRB.CreateLoad(ModuleId), 0);
+    Info = IRB.CreateInsertValue(Info, IRB.getInt64(NumBasicBlocks), 1);
+    CallInst *Call = IRB.CreateCall(InitFunction, {Info});
+
+    appendToGlobalCtors(M, Ctor, CsiModuleCtorPriority);
+
     CG = &getAnalysis<CallGraphWrapperPass>().getCallGraph();
+
+    CallGraphNode *CNCtor = CG->getOrInsertFunction(Ctor);
+    CallGraphNode *CNFunc = CG->getOrInsertFunction(InitFunction);
+    CNCtor->addCalledFunction(Call, CNFunc);
 
     CsiInitialized = true;
   }
