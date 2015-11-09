@@ -2,6 +2,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringExtras.h" // for itostr function
+#include "llvm/Analysis/CallGraph.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -35,6 +36,9 @@ static const char *const CsiModuleInitName = "__csi_module_init";
 static const char *const CsiModuleIdName = "__csi_module_id";
 static const char *const CsiInitCtorName = "csi.init_ctor";
 static const char *const CsiInitName = "__csi_init";
+// See llvm/tools/clang/lib/CodeGen/CodeGenModule.h:
+static const int CsiModuleCtorPriority = 65535,
+    CsiInitCtorPriority = 65534;
 
 namespace {
 
@@ -45,6 +49,8 @@ struct CodeSpectatorInterface : public FunctionPass {
   const char *getPassName() const override;
   bool doInitialization(Module &M) override;
   bool runOnFunction(Function &F) override;
+  void getAnalysisUsage(AnalysisUsage &AU) const override;
+
   // not overriding doFinalization
 
 private:
@@ -60,9 +66,12 @@ private:
   // instrument a call to memmove, memcpy, or memset
   void instrumentMemIntrinsic(inst_iterator I);
   bool instrumentBasicBlock(BasicBlock &BB);
-
+  bool FunctionCallsFunction(Function *F, Function *G);
+  bool ShouldNotInstrumentFunction(Function &F);
+  void InitializeCsi(Module &M);
   uint64_t GetNextBasicBlockId();
 
+  CallGraph *CG;
   bool CsiInitialized;
   GlobalVariable *ModuleId;
   uint64_t NextBasicBlockId;
@@ -321,21 +330,6 @@ bool CodeSpectatorInterface::instrumentBasicBlock(BasicBlock &BB) {
 bool CodeSpectatorInterface::doInitialization(Module &M) {
   DEBUG_WITH_TYPE("csi-func", errs() << "CSI_func: doInitialization" << "\n");
 
-  uint64_t NumBasicBlocks = 0;
-  IntegerType *Int64Ty = IntegerType::get(M.getContext(), 64);
-  StructType *CsiModuleInfoType = StructType::create({Int64Ty}, "__csi_module_info_t");
-
-  for (Function &F : M) {
-      NumBasicBlocks += F.size();
-  }
-
-  // Add call to module init
-  std::tie(CsiModuleCtorFunction, std::ignore) = createSanitizerCtorAndInitFunctions(
-      M, CsiModuleCtorName, CsiModuleInitName,
-      /*InitArgTypes=*/{CsiModuleInfoType},
-      /*InitArgs=*/{ConstantStruct::get(CsiModuleInfoType, {ConstantInt::get(Int64Ty, NumBasicBlocks)})});
-  appendToGlobalCtors(M, CsiModuleCtorFunction, 0);
-
   IntptrTy = M.getDataLayout().getIntPtrType(M.getContext());
 
   DEBUG_WITH_TYPE("csi-func",
@@ -343,22 +337,119 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
   return true;
 }
 
+void CodeSpectatorInterface::InitializeCsi(Module &M) {
+  LLVMContext &C = M.getContext();
+  IntegerType *Int32Ty = IntegerType::get(C, 32), *Int64Ty = IntegerType::get(C, 64);
+
+  CsiIdType = StructType::create({Int32Ty, Int64Ty}, "__csi_id_t");
+  ModuleId = new GlobalVariable(M, Int32Ty, false, GlobalValue::InternalLinkage, ConstantInt::get(Int32Ty, 0), CsiModuleIdName);
+  assert(ModuleId);
+
+  initializeFuncCallbacks(M);
+  initializeLoadStoreCallbacks(M);
+  initializeBasicBlockCallbacks(M);
+
+  CG = &getAnalysis<CallGraphWrapperPass>().getCallGraph();
+
+  uint64_t NumBasicBlocks = 0;
+  for (Function &F : M) {
+    if (ShouldNotInstrumentFunction(F)) continue;
+    NumBasicBlocks += F.size();
+  }
+
+  // Add CSI global constructor, which calls module init.
+  Function *Ctor = Function::Create(
+      FunctionType::get(Type::getVoidTy(M.getContext()), false),
+      GlobalValue::InternalLinkage, CsiModuleCtorName, &M);
+  BasicBlock *CtorBB = BasicBlock::Create(M.getContext(), "", Ctor);
+  IRBuilder<> IRB(ReturnInst::Create(M.getContext(), CtorBB));
+
+  StructType *CsiModuleInfoType = StructType::create({Int32Ty, Int64Ty}, "__csi_module_info_t");
+  SmallVector<Type *, 4> InitArgTypes({CsiModuleInfoType});
+  Function *InitFunction = dyn_cast<Function>(M.getOrInsertFunction(CsiModuleInitName, FunctionType::get(IRB.getVoidTy(), InitArgTypes, false)));
+  assert(InitFunction);
+
+  Value *Info = IRB.CreateInsertValue(UndefValue::get(CsiModuleInfoType), IRB.CreateLoad(ModuleId), 0);
+  Info = IRB.CreateInsertValue(Info, IRB.getInt64(NumBasicBlocks), 1);
+  CallInst *Call = IRB.CreateCall(InitFunction, {Info});
+
+  appendToGlobalCtors(M, Ctor, CsiModuleCtorPriority);
+
+  CallGraphNode *CNCtor = CG->getOrInsertFunction(Ctor);
+  CallGraphNode *CNFunc = CG->getOrInsertFunction(InitFunction);
+  CNCtor->addCalledFunction(Call, CNFunc);
+
+  CsiInitialized = true;
+}
+
+void CodeSpectatorInterface::getAnalysisUsage(AnalysisUsage &AU) const {
+  AU.addRequired<CallGraphWrapperPass>();
+}
+
+// Recursively determine if F calls G. Return true if so. Conservatively, if F makes
+// any internal indirect function calls, assume it calls G.
+bool CodeSpectatorInterface::FunctionCallsFunction(Function *F, Function *G) {
+  assert(F && G && CG);
+  CallGraphNode *CGN = (*CG)[F];
+  // Assume external functions cannot make calls to internal functions.
+  if (!F->hasLocalLinkage() && G->hasLocalLinkage()) return false;
+  // Assume function declarations won't make calls to internal
+  // functions. TODO: This may not be correct in general.
+  if (F->isDeclaration()) return false;
+  for (CallGraphNode::iterator it = CGN->begin(), ite = CGN->end(); it != ite; ++it) {
+    Function *Called = it->second->getFunction();
+    if (Called == NULL) {
+      // Indirect call
+      return true;
+    } else if (Called == G) {
+      return true;
+    } else if (G->hasLocalLinkage() && !Called->hasLocalLinkage()) {
+      // Assume external functions cannot make calls to internal functions.
+      continue;
+    }
+  }
+  for (CallGraphNode::iterator it = CGN->begin(), ite = CGN->end(); it != ite; ++it) {
+    Function *Called = it->second->getFunction();
+    if (FunctionCallsFunction(Called, G)) return true;
+  }
+  return false;
+}
+
+bool CodeSpectatorInterface::ShouldNotInstrumentFunction(Function &F) {
+    Module &M = *F.getParent();
+    if (F.hasName() && F.getName() == CsiModuleCtorName) {
+        return true;
+    }
+    // Don't instrument functions that will run before or
+    // simultaneously with CSI ctors.
+    GlobalVariable *GV = M.getGlobalVariable("llvm.global_ctors");
+    if (GV == nullptr) return false;
+    ConstantArray *CA = cast<ConstantArray>(GV->getInitializer());
+    for (Use &OP : CA->operands()) {
+        if (isa<ConstantAggregateZero>(OP)) continue;
+        ConstantStruct *CS = cast<ConstantStruct>(OP);
+
+        if (Function *CF = dyn_cast<Function>(CS->getOperand(1))) {
+            uint64_t Priority = dyn_cast<ConstantInt>(CS->getOperand(0))->getLimitedValue();
+            if (Priority <= CsiModuleCtorPriority) {
+                return CF->getName() == F.getName() ||  FunctionCallsFunction(CF, &F);
+            }
+        }
+    }
+    // false means do instrument it.
+    return false;
+}
+
 bool CodeSpectatorInterface::runOnFunction(Function &F) {
   // This is required to prevent instrumenting the call to
   // __csi_module_init from within the module constructor.
-  if (&F == CsiModuleCtorFunction)
-      return false;
   if (!CsiInitialized) {
     Module &M = *F.getParent();
-    LLVMContext &C = M.getContext();
-    CsiIdType = StructType::create({IntegerType::get(C, 32), IntegerType::get(C, 64)},
-                                "__csi_id_t");
-    initializeFuncCallbacks(M);
-    initializeLoadStoreCallbacks(M);
-    initializeBasicBlockCallbacks(M);
-    IntegerType *ty = IntegerType::get(C, 32);
-    ModuleId = new GlobalVariable(M, ty, false, GlobalValue::InternalLinkage, ConstantInt::get(ty, 0), CsiModuleIdName);
-    CsiInitialized = true;
+    InitializeCsi(M);
+  }
+
+  if (ShouldNotInstrumentFunction(F)) {
+      return false;
   }
 
   DEBUG_WITH_TYPE("csi-func",
@@ -481,9 +572,12 @@ bool CodeSpectatorInterfaceLT::runOnModule(Module &M) {
   SmallVector<Value *, 4> InitArgs({ConstantStruct::get(CsiInfoType, {IRB.getInt32(NumModules)})});
 
   Constant *InitFunction = M.getOrInsertFunction(CsiInitName, FunctionType::get(IRB.getVoidTy(), InitArgTypes, false));
+  assert(InitFunction);
   IRB.CreateCall(InitFunction, InitArgs);
 
-  appendToGlobalCtors(M, Ctor, 0);
+  // Ensure whole-program init is called before module init.
+  // TODO: do all targets support this?
+  appendToGlobalCtors(M, Ctor, CsiInitCtorPriority);
 
   return true;
 }
