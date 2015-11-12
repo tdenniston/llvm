@@ -35,6 +35,7 @@ STATISTIC(NumAccessesWithBadSize, "Number of accesses with bad size");
 static const char *const CsiModuleCtorName = "csi.module_ctor";
 static const char *const CsiModuleInitName = "__csi_module_init";
 static const char *const CsiModuleIdName = "__csi_module_id";
+static const char *const CsiModuleFilenameName = "__csi_module_filename";
 static const char *const CsiInitCtorName = "csi.init_ctor";
 static const char *const CsiInitName = "__csi_init";
 // See llvm/tools/clang/lib/CodeGen/CodeGenModule.h:
@@ -74,7 +75,7 @@ private:
 
   CallGraph *CG;
   bool CsiInitialized;
-  GlobalVariable *ModuleId;
+  GlobalVariable *ModuleId, *ModuleFilename;
   uint64_t NextBasicBlockId;
   Function *CsiModuleCtorFunction;
 
@@ -370,6 +371,21 @@ void CodeSpectatorInterface::InitializeCsi(Module &M) {
   CsiIdType = StructType::create({Int32Ty, Int64Ty}, "__csi_id_t");
   ModuleId = new GlobalVariable(M, Int32Ty, false, GlobalValue::InternalLinkage, ConstantInt::get(Int32Ty, 0), CsiModuleIdName);
   assert(ModuleId);
+
+
+  std::string filename = "";
+  BasicBlock &Entry = M.getFunctionList().front().front();
+  for (Instruction &I : Entry) {
+    MDNode *MD = I.getMetadata("dbg");
+    if (!MD) continue;
+    if (DILocation *DI = dyn_cast<DILocation>(MD)) {
+      filename = DI->getFilename();
+      break;
+    }
+  }
+
+  Constant *Filename = ConstantDataArray::getString(C, filename);
+  ModuleFilename = new GlobalVariable(M, Filename->getType(), true, GlobalValue::InternalLinkage, Filename, CsiModuleFilenameName);
 
   initializeFuncCallbacks(M);
   initializeLoadStoreCallbacks(M);
