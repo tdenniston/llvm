@@ -72,6 +72,7 @@ private:
   bool ShouldNotInstrumentFunction(Function &F);
   void InitializeCsi(Module &M);
   uint64_t GetNextBasicBlockId();
+  void GetBasicBlockDebugInfo(BasicBlock &BB, Constant *&LineStart, Constant *&LineEnd);
 
   CallGraph *CG;
   bool CsiInitialized;
@@ -123,8 +124,9 @@ void CodeSpectatorInterface::initializeFuncCallbacks(Module &M) {
 
 void CodeSpectatorInterface::initializeBasicBlockCallbacks(Module &M) {
   IRBuilder<> IRB(M.getContext());
+  assert(ModuleFilename);
   CsiBBEntry = checkCsiInterfaceFunction(M.getOrInsertFunction(
-      "__csi_bb_entry", IRB.getVoidTy(), CsiIdType, nullptr));
+      "__csi_bb_entry", IRB.getVoidTy(), CsiIdType, ModuleFilename->getType(), IRB.getInt32Ty(), IRB.getInt32Ty(), nullptr));
   CsiBBExit = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_bb_exit", IRB.getVoidTy(), nullptr));
 }
@@ -318,16 +320,7 @@ uint64_t CodeSpectatorInterface::GetNextBasicBlockId() {
   return NextBasicBlockId++;
 }
 
-bool CodeSpectatorInterface::instrumentBasicBlock(BasicBlock &BB) {
-  uint64_t BBId = GetNextBasicBlockId();
-  IRBuilder<> IRB(BB.getFirstInsertionPt());
-  Value *Id = IRB.CreateInsertValue(UndefValue::get(CsiIdType), IRB.CreateLoad(ModuleId), 0);
-  Id = IRB.CreateInsertValue(Id, IRB.getInt64(BBId), 1);
-  IRB.CreateCall(CsiBBEntry, {Id});
-  TerminatorInst *TI = BB.getTerminator();
-  IRB.SetInsertPoint(TI);
-  IRB.CreateCall(CsiBBExit, {});
-
+void CodeSpectatorInterface::GetBasicBlockDebugInfo(BasicBlock &BB, Constant *&LineStart, Constant *&LineEnd) {
   DILocation *MDFirst = nullptr, *MDLast = nullptr;
   for (Instruction &I : BB) {
     MDNode *MD = I.getMetadata("dbg");
@@ -338,18 +331,37 @@ bool CodeSpectatorInterface::instrumentBasicBlock(BasicBlock &BB) {
     }
   }
 
+  unsigned linestart = 0, lineend = 0;
   if (MDFirst) {
     assert(MDLast);
-    std::string Filename = MDFirst->getFilename();
-    unsigned linestart = MDFirst->getLine(), lineend = MDLast->getLine();
+    linestart = MDFirst->getLine();
+    lineend = MDLast->getLine();
     if (linestart > lineend) {
       // Can happen with highly optimized code.
       std::swap(linestart, lineend);
     }
-    errs() << "BB id " << BBId << " is " << Filename << ":" << linestart << "--" << lineend << "\n";
-  } else {
-    assert(false && "Unimplemented no debug info");
   }
+
+  LLVMContext &C = BB.getParent()->getParent()->getContext();
+  IntegerType *Int32Ty = IntegerType::get(C, 32);
+  LineStart = ConstantInt::get(Int32Ty, linestart);
+  LineEnd = ConstantInt::get(Int32Ty, lineend);
+}
+
+bool CodeSpectatorInterface::instrumentBasicBlock(BasicBlock &BB) {
+  uint64_t BBId = GetNextBasicBlockId();
+  IRBuilder<> IRB(BB.getFirstInsertionPt());
+  Value *Id = IRB.CreateInsertValue(UndefValue::get(CsiIdType), IRB.CreateLoad(ModuleId), 0);
+  Id = IRB.CreateInsertValue(Id, IRB.getInt64(BBId), 1);
+
+  Constant *LineStart, *LineEnd;
+  GetBasicBlockDebugInfo(BB, LineStart, LineEnd);
+  assert(LineStart && LineEnd);
+  IRB.CreateCall(CsiBBEntry, {Id, ModuleFilename, LineStart, LineEnd});
+
+  TerminatorInst *TI = BB.getTerminator();
+  IRB.SetInsertPoint(TI);
+  IRB.CreateCall(CsiBBExit, {});
 
   return true;
 }
