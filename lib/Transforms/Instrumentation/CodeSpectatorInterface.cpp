@@ -4,6 +4,7 @@
 #include "llvm/ADT/StringExtras.h" // for itostr function
 #include "llvm/Analysis/CallGraph.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/IntrinsicInst.h"
@@ -317,13 +318,38 @@ uint64_t CodeSpectatorInterface::GetNextBasicBlockId() {
 }
 
 bool CodeSpectatorInterface::instrumentBasicBlock(BasicBlock &BB) {
+  uint64_t BBId = GetNextBasicBlockId();
   IRBuilder<> IRB(BB.getFirstInsertionPt());
   Value *Id = IRB.CreateInsertValue(UndefValue::get(CsiIdType), IRB.CreateLoad(ModuleId), 0);
-  Id = IRB.CreateInsertValue(Id, IRB.getInt64(GetNextBasicBlockId()), 1);
+  Id = IRB.CreateInsertValue(Id, IRB.getInt64(BBId), 1);
   IRB.CreateCall(CsiBBEntry, {Id});
   TerminatorInst *TI = BB.getTerminator();
   IRB.SetInsertPoint(TI);
   IRB.CreateCall(CsiBBExit, {});
+
+  DILocation *MDFirst = nullptr, *MDLast = nullptr;
+  for (Instruction &I : BB) {
+    MDNode *MD = I.getMetadata("dbg");
+    if (!MD) continue;
+    if (DILocation *DI = dyn_cast<DILocation>(MD)) {
+      if (!MDFirst) MDFirst = DI;
+      MDLast = DI;
+    }
+  }
+
+  if (MDFirst) {
+    assert(MDLast);
+    std::string Filename = MDFirst->getFilename();
+    unsigned linestart = MDFirst->getLine(), lineend = MDLast->getLine();
+    if (linestart > lineend) {
+      // Can happen with highly optimized code.
+      std::swap(linestart, lineend);
+    }
+    errs() << "BB id " << BBId << " is " << Filename << ":" << linestart << "--" << lineend << "\n";
+  } else {
+    assert(false && "Unimplemented no debug info");
+  }
+
   return true;
 }
 
