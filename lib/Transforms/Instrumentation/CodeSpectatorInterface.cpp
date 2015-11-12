@@ -186,7 +186,7 @@ int CodeSpectatorInterface::getNumBytesAccessed(Value *Addr,
   Type *OrigTy = cast<PointerType>(OrigPtrTy)->getElementType();
   assert(OrigTy->isSized());
   uint32_t TypeSize = DL.getTypeStoreSizeInBits(OrigTy);
-  if (TypeSize != 8  && TypeSize != 16 && TypeSize != 32 && TypeSize != 64) {
+  if (TypeSize != 8  && TypeSize != 16 && TypeSize != 32 && TypeSize != 64 && TypeSize != 128) {
     DEBUG_WITH_TYPE("csi-func",
         errs() << "Bad size " << TypeSize << " at addr " << Addr << "\n");
     NumAccessesWithBadSize++;
