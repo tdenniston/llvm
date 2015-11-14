@@ -485,6 +485,7 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
     instrumentMemIntrinsic(I);
 
   // Instrument function entry/exit points.
+  IRBuilder<> IRB(F.getEntryBlock().getFirstInsertionPt());
   Value *Function = ConstantExpr::getBitCast(&F, IRB.getInt8PtrTy());
   Value *FunctionName = IRB.CreateGlobalStringPtr(F.getName());
   Value *ReturnAddress = IRB.CreateCall(
