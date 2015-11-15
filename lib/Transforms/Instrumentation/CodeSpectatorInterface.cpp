@@ -484,6 +484,14 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   for (inst_iterator I : MemIntrinsics)
     instrumentMemIntrinsic(I);
 
+  // Instrument basic blocks
+  // Note that we do this before function entry so that we put this at the
+  // beginning of the basic block, and then the function entry call goes before
+  // the call to basic block entry.
+  for (BasicBlock &BB : F) {
+    Modified |= instrumentBasicBlock(BB);
+  }
+
   // Instrument function entry/exit points.
   IRBuilder<> IRB(F.getEntryBlock().getFirstInsertionPt());
   Value *Function = ConstantExpr::getBitCast(&F, IRB.getInt8PtrTy());
@@ -499,11 +507,6 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
       IRBRet.CreateCall(CsiFuncExit, {});
   }
   Modified = true;
-
-  // Instrument basic blocks
-  for (BasicBlock &BB : F) {
-    Modified |= instrumentBasicBlock(BB);
-  }
 
   if(Modified) {
     DEBUG_WITH_TYPE("csi-func",
