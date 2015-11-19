@@ -1,8 +1,10 @@
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringExtras.h" // for itostr function
 #include "llvm/Analysis/CallGraph.h"
+#include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -42,6 +44,12 @@ static const int CsiModuleCtorPriority = 65535,
 
 namespace {
 
+typedef struct {
+  unsigned unused;
+  bool unused2, unused3;
+  bool read_before_write_in_bb;
+} csi_acc_prop_t;
+
 struct CodeSpectatorInterface : public FunctionPass {
   static char ID;
 
@@ -62,9 +70,21 @@ private:
   // Basic block entry and exit instrumentation
   void initializeBasicBlockCallbacks(Module &M);
   // actually insert the instrumentation call
-  bool instrumentLoadOrStore(inst_iterator Iter, const DataLayout &DL);
+  bool instrumentLoadOrStore(BasicBlock::iterator Iter, csi_acc_prop_t prop, const DataLayout &DL);
+
+  void computeAttributesForMemoryAccesses(
+      SmallVectorImpl<std::pair<BasicBlock::iterator, csi_acc_prop_t> > &Accesses,
+      SmallVectorImpl<BasicBlock::iterator> &LocalAccesses);
+
+  bool addLoadStoreInstrumentation(BasicBlock::iterator Iter,
+                                   Function *BeforeFn,
+                                   Function *AfterFn,
+                                   Type *AddrType,
+                                   Value *Addr,
+                                   int NumBytes,
+                                   csi_acc_prop_t prop);
   // instrument a call to memmove, memcpy, or memset
-  void instrumentMemIntrinsic(inst_iterator I);
+  void instrumentMemIntrinsic(BasicBlock::iterator I);
   bool instrumentBasicBlock(BasicBlock &BB);
   bool FunctionCallsFunction(Function *F, Function *G);
   bool ShouldNotInstrumentFunction(Function &F);
@@ -89,6 +109,7 @@ private:
 
   Type *IntptrTy;
   StructType *CsiIdType;
+  StructType *CsiAccPropType;
 }; //struct CodeSpectatorInterface
 } //namespace
 
@@ -196,7 +217,35 @@ int CodeSpectatorInterface::getNumBytesAccessed(Value *Addr,
   return TypeSize / 8;
 }
 
-bool CodeSpectatorInterface::instrumentLoadOrStore(inst_iterator Iter,
+bool CodeSpectatorInterface::addLoadStoreInstrumentation(BasicBlock::iterator Iter,
+                                                         Function *BeforeFn,
+                                                         Function *AfterFn,
+                                                         Type *AddrType,
+                                                         Value *Addr,
+                                                         int NumBytes,
+                                                         csi_acc_prop_t prop) {
+  IRBuilder<> IRB(&(*Iter));
+  IRB.CreateCall(BeforeFn,
+      // XXX: should I just use the pointer type with the right size?
+      {IRB.CreatePointerCast(Addr, AddrType),
+       IRB.getInt32(NumBytes),
+       IRB.getInt32(0)}); // XXX: use 0 for attr for now; FIXME
+
+  // The iterator currently points between the inserted instruction and the
+  // store instruction. We now want to insert an instruction after the store
+  // instruction.
+  Iter++;
+  IRB.SetInsertPoint(&*Iter);
+
+  IRB.CreateCall(AfterFn,
+      {IRB.CreatePointerCast(Addr, AddrType),
+       IRB.getInt32(NumBytes),
+       IRB.getInt32(0)});
+  return true;
+}
+
+bool CodeSpectatorInterface::instrumentLoadOrStore(BasicBlock::iterator Iter,
+                                                   csi_acc_prop_t prop,
                                                    const DataLayout &DL) {
 
   DEBUG_WITH_TYPE("csi-func",
@@ -204,7 +253,7 @@ bool CodeSpectatorInterface::instrumentLoadOrStore(inst_iterator Iter,
 
   Instruction *I = &(*Iter);
   // takes pointer to Instruction and inserts before the instruction
-  IRBuilder<> IRB(I);
+  IRBuilder<> IRB(&(*Iter));
   bool IsWrite = isa<StoreInst>(I);
   Value *Addr = IsWrite ?
       cast<StoreInst>(I)->getPointerOperand()
@@ -226,63 +275,19 @@ bool CodeSpectatorInterface::instrumentLoadOrStore(inst_iterator Iter,
   else
     OnAccessFunc = IsWrite ? TsanUnalignedWrite[Idx] : TsanUnalignedRead[Idx];
   */
+  bool Res = false;
   if(IsWrite) {
-    StoreInst *S = cast<StoreInst>(I);
-    Type *SType = S->getValueOperand()->getType();
-
-    DEBUG_WITH_TYPE("csi-func",
-        errs() << "CSI_func: creating call to before store for "
-               << NumBytes << " bytes and type " << SType << "\n");
-    IRB.CreateCall(CsiBeforeWrite,
-        // XXX: should I just use the pointer type with the right size?
-        {IRB.CreatePointerCast(Addr, AddrType),
-         IRB.getInt32(NumBytes),
-         IRB.getInt32(0)}); // XXX: use 0 for attr for now; FIXME
-
-    // The iterator currently points between the inserted instruction and the
-    // store instruction. We now want to insert an instruction after the store
-    // instruction.
-    Iter++;
-    IRB.SetInsertPoint(&*Iter);
-
-    DEBUG_WITH_TYPE("csi-func",
-        errs() << "CSI_func: creating call to after store for "
-               << NumBytes << " bytes\n");
-    IRB.CreateCall(CsiAfterWrite,
-        {IRB.CreatePointerCast(Addr, AddrType),
-         IRB.getInt32(NumBytes),
-         IRB.getInt32(0)});
+    Res = addLoadStoreInstrumentation(
+        Iter, CsiBeforeWrite, CsiAfterWrite, AddrType, Addr, NumBytes, prop);
     NumInstrumentedWrites++;
 
   } else { // is read
-    LoadInst *L = cast<LoadInst>(I);
-    Type *LType = L->getType();
-
-    DEBUG_WITH_TYPE("csi-func",
-        errs() << "CSI_func: creating call to before load for "
-               << NumBytes << " bytes and type " << LType << "\n");
-    IRB.CreateCall(CsiBeforeRead,
-        {IRB.CreatePointerCast(Addr, AddrType),
-         IRB.getInt32(NumBytes),
-         IRB.getInt32(0)});
-
-    // The iterator currently points between the inserted instruction and the
-    // store instruction. We now want to insert an instruction after the store
-    // instruction.
-    Iter++;
-    IRB.SetInsertPoint(&*Iter);
-
-    DEBUG_WITH_TYPE("csi-func",
-        errs() << "CSI_func: creating call to after load for "
-               << NumBytes << " bytes\n");
-    IRB.CreateCall(CsiAfterRead,
-        {IRB.CreatePointerCast(Addr, AddrType),
-         IRB.getInt32(NumBytes),
-         IRB.getInt32(0)});
+    Res = addLoadStoreInstrumentation(
+        Iter, CsiBeforeRead, CsiAfterRead, AddrType, Addr, NumBytes, prop);
     NumInstrumentedReads++;
   }
 
-  return true;
+  return Res;
 }
 
 // If a memset intrinsic gets inlined by the code gen, we will miss races on it.
@@ -293,7 +298,7 @@ bool CodeSpectatorInterface::instrumentLoadOrStore(inst_iterator Iter,
 // Since our pass runs after everyone else, the calls should not be
 // replaced back with intrinsics. If that becomes wrong at some point,
 // we will need to call e.g. __csi_memset to avoid the intrinsics.
-void CodeSpectatorInterface::instrumentMemIntrinsic(inst_iterator Iter) {
+void CodeSpectatorInterface::instrumentMemIntrinsic(BasicBlock::iterator Iter) {
   Instruction *I = &(*Iter);
   IRBuilder<> IRB(I);
   if (MemSetInst *M = dyn_cast<MemSetInst>(I)) {
@@ -340,11 +345,15 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
 
 void CodeSpectatorInterface::InitializeCsi(Module &M) {
   LLVMContext &C = M.getContext();
-  IntegerType *Int32Ty = IntegerType::get(C, 32), *Int64Ty = IntegerType::get(C, 64);
+  IntegerType *Int1Ty  = IntegerType::get(C, 1),
+              *Int32Ty = IntegerType::get(C, 32),
+              *Int64Ty = IntegerType::get(C, 64);
 
   CsiIdType = StructType::create({Int32Ty, Int64Ty}, "__csi_id_t");
   ModuleId = new GlobalVariable(M, Int32Ty, false, GlobalValue::InternalLinkage, ConstantInt::get(Int32Ty, 0), CsiModuleIdName);
   assert(ModuleId);
+
+  CsiAccPropType = StructType::create({Int64Ty, Int1Ty, Int1Ty, Int1Ty}, "__csi_acc_prop_t");
 
   initializeFuncCallbacks(M);
   initializeLoadStoreCallbacks(M);
@@ -441,6 +450,30 @@ bool CodeSpectatorInterface::ShouldNotInstrumentFunction(Function &F) {
     return false;
 }
 
+void CodeSpectatorInterface::computeAttributesForMemoryAccesses(
+    SmallVectorImpl<std::pair<BasicBlock::iterator, csi_acc_prop_t> > &MemoryAccesses,
+    SmallVectorImpl<BasicBlock::iterator> &LocalAccesses) {
+  SmallSet<Value*, 8> WriteTargets;
+
+  for (SmallVectorImpl<BasicBlock::iterator>::reverse_iterator It = LocalAccesses.rbegin(),
+      E = LocalAccesses.rend(); It != E; ++It) {
+    BasicBlock::iterator II = *It;
+    Instruction *I = &(*II);
+    if (StoreInst *Store = dyn_cast<StoreInst>(I)) {
+      WriteTargets.insert(Store->getPointerOperand());
+      MemoryAccesses.push_back(
+        std::make_pair(II, csi_acc_prop_t{0, false, false, false}));
+    } else {
+      LoadInst *Load = cast<LoadInst>(I);
+      Value *Addr = Load->getPointerOperand();
+      bool HasBeenSeen = WriteTargets.count(Addr) > 0;
+      MemoryAccesses.push_back(
+        std::make_pair(II, csi_acc_prop_t{0, false, false, HasBeenSeen}));
+    }
+  }
+  LocalAccesses.clear();
+}
+
 bool CodeSpectatorInterface::runOnFunction(Function &F) {
   // This is required to prevent instrumenting the call to
   // __csi_module_init from within the module constructor.
@@ -456,32 +489,41 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   DEBUG_WITH_TYPE("csi-func",
                   errs() << "CSI_func: run on function " << F.getName() << "\n");
 
-  SmallVector<inst_iterator, 8> MemoryAccesses;
-  SmallVector<inst_iterator, 8> RetVec;
-  SmallVector<inst_iterator, 8> MemIntrinsics;
+  SmallVector<std::pair<BasicBlock::iterator, csi_acc_prop_t>, 8> MemoryAccesses;
+  SmallSet<Value*, 8> WriteTargets;
+  SmallVector<BasicBlock::iterator, 8> LocalMemoryAccesses;
+
+  SmallVector<BasicBlock::iterator, 8> RetVec;
+  SmallVector<BasicBlock::iterator, 8> MemIntrinsics;
   bool Modified = false;
   const DataLayout &DL = F.getParent()->getDataLayout();
 
   // Traverse all instructions in a function and insert instrumentation
   // on load & store
-  for (inst_iterator I = inst_begin(F); I != inst_end(F); ++I) {
-    // We need the Instruction Iterator to modify the code
-    if (isa<LoadInst>(*I) || isa<StoreInst>(*I)) {
-      MemoryAccesses.push_back(I);
-    } else if (isa<ReturnInst>(*I)) {
-      RetVec.push_back(I);
-    } else if (isa<CallInst>(*I) || isa<InvokeInst>(*I)) {
-      if (isa<MemIntrinsic>(&(*I)))
-        MemIntrinsics.push_back(I);
+  // TODO(ddoucet): the below seems to suggest (as taken from tsan) that a
+  // basic block can have a non-terminating call instruction?
+  for (BasicBlock &BB : F) {
+    for (auto II = BB.begin(); II != BB.end(); II++) {
+      Instruction *I = &(*II);
+      if (isa<LoadInst>(*I) || isa<StoreInst>(*I)) {
+        LocalMemoryAccesses.push_back(II);
+      } else if (isa<ReturnInst>(*I)) {
+        RetVec.push_back(II);
+      } else if (isa<CallInst>(*I) || isa<InvokeInst>(*I)) {
+        if (isa<MemIntrinsic>(I))
+          MemIntrinsics.push_back(II);
+        computeAttributesForMemoryAccesses(MemoryAccesses, LocalMemoryAccesses);
+      }
     }
+    computeAttributesForMemoryAccesses(MemoryAccesses, LocalMemoryAccesses);
   }
 
   // Do this work in a separate loop after copying the iterators so that we
   // aren't modifying the list as we're iterating.
-  for (inst_iterator I : MemoryAccesses)
-    Modified |= instrumentLoadOrStore(I, DL);
+  for (std::pair<BasicBlock::iterator, csi_acc_prop_t> p : MemoryAccesses)
+    Modified |= instrumentLoadOrStore(p.first, p.second, DL);
 
-  for (inst_iterator I : MemIntrinsics)
+  for (BasicBlock::iterator I : MemIntrinsics)
     instrumentMemIntrinsic(I);
 
   // Instrument basic blocks
@@ -501,7 +543,7 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
       IRB.getInt32(0));
   IRB.CreateCall(CsiFuncEntry, {Function, ReturnAddress, FunctionName});
 
-  for (inst_iterator I : RetVec) {
+  for (BasicBlock::iterator I : RetVec) {
       Instruction *RetInst = &(*I);
       IRBuilder<> IRBRet(RetInst);
       IRBRet.CreateCall(CsiFuncExit, {});
