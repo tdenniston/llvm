@@ -168,8 +168,9 @@ void CodeSpectatorInterface::initializeLoadStoreCallbacks(Module &M) {
   Type *RetType = IRB.getVoidTy();            // return void
   Type *AddrType = IRB.getInt8PtrTy();        // void *addr
   Type *NumBytesType = IRB.getInt32Ty();      // int num_bytes
-  Type *AttrType = IRB.getInt32Ty();          // int attr
-
+  // Type *AttrType = IRB.getInt32Ty();          // int attr
+  Type *BoolType = IRB.getInt1Ty();
+  
   // Initialize the instrumentation for reads, writes
   // NOTE: nullptr is a new C++11 construct; denote a null pointer
   // here, just used to denote end of args;
@@ -177,23 +178,23 @@ void CodeSpectatorInterface::initializeLoadStoreCallbacks(Module &M) {
   // void __csi_before_load(void *addr, int num_bytes, int attr);
   CsiBeforeRead = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_before_load", RetType,
-                            AddrType, NumBytesType, AttrType, nullptr));
+                            AddrType, NumBytesType, IRB.getInt32Ty(), BoolType, BoolType, BoolType, nullptr));
 
   // void __csi_after_load(void *addr, int num_bytes, int attr);
   SmallString<32> AfterReadName("__csi_after_load");
   CsiAfterRead = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_after_load", RetType,
-                            AddrType, NumBytesType, AttrType, nullptr));
+                            AddrType, NumBytesType, IRB.getInt32Ty(), BoolType, BoolType, BoolType, nullptr));
 
   // void __csi_before_store(void *addr, int num_bytes, int attr);
   CsiBeforeWrite = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_before_store", RetType,
-                            AddrType, NumBytesType, AttrType, nullptr));
+                            AddrType, NumBytesType, IRB.getInt32Ty(), BoolType, BoolType, BoolType, nullptr));
 
   // void __csi_after_store(void *addr, int num_bytes, int attr);
   CsiAfterWrite = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_after_store", RetType,
-                            AddrType, NumBytesType, AttrType, nullptr));
+                            AddrType, NumBytesType, IRB.getInt32Ty(), BoolType, BoolType, BoolType, nullptr));
 
   MemmoveFn = checkCsiInterfaceFunction(
       M.getOrInsertFunction("memmove", IRB.getInt8PtrTy(), IRB.getInt8PtrTy(),
@@ -233,7 +234,10 @@ bool CodeSpectatorInterface::addLoadStoreInstrumentation(BasicBlock::iterator It
       // XXX: should I just use the pointer type with the right size?
       {IRB.CreatePointerCast(Addr, AddrType),
        IRB.getInt32(NumBytes),
-       IRB.getInt32(0)}); // XXX: use 0 for attr for now; FIXME
+       IRB.getInt32(prop.unused),
+       IRB.getInt1(prop.unused2),
+       IRB.getInt1(prop.unused3),
+       IRB.getInt1(prop.read_before_write_in_bb)});
 
   // The iterator currently points between the inserted instruction and the
   // store instruction. We now want to insert an instruction after the store
@@ -244,7 +248,11 @@ bool CodeSpectatorInterface::addLoadStoreInstrumentation(BasicBlock::iterator It
   IRB.CreateCall(AfterFn,
       {IRB.CreatePointerCast(Addr, AddrType),
        IRB.getInt32(NumBytes),
-       IRB.getInt32(0)});
+       IRB.getInt32(prop.unused),
+       IRB.getInt1(prop.unused2),
+       IRB.getInt1(prop.unused3),
+       IRB.getInt1(prop.read_before_write_in_bb)});
+
   return true;
 }
 
