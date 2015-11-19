@@ -143,8 +143,12 @@ void CodeSpectatorInterface::initializeFuncCallbacks(Module &M) {
 
 void CodeSpectatorInterface::initializeBasicBlockCallbacks(Module &M) {
   IRBuilder<> IRB(M.getContext());
-  CsiBBEntry = checkCsiInterfaceFunction(M.getOrInsertFunction(
-      "__csi_bb_entry", IRB.getVoidTy(), CsiIdType, nullptr));
+  // XXX: Don't use structs until LTO optimizes calls using structs away.
+  // CsiBBEntry = checkCsiInterfaceFunction(M.getOrInsertFunction(
+  //     "__csi_bb_entry", IRB.getVoidTy(), CsiIdType, nullptr));
+  SmallVector<Type *, 4> ArgTypes({IRB.getInt32Ty()});
+  CsiBBEntry = checkCsiInterfaceFunction(M.getOrInsertFunction("__csi_bb_entry", FunctionType::get(IRB.getVoidTy(), ArgTypes, false)));
+  
   CsiBBExit = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_bb_exit", IRB.getVoidTy(), nullptr));
 }
@@ -324,9 +328,12 @@ uint64_t CodeSpectatorInterface::GetNextBasicBlockId() {
 
 bool CodeSpectatorInterface::instrumentBasicBlock(BasicBlock &BB) {
   IRBuilder<> IRB(BB.getFirstInsertionPt());
-  Value *Id = IRB.CreateInsertValue(UndefValue::get(CsiIdType), IRB.CreateLoad(ModuleId), 0);
-  Id = IRB.CreateInsertValue(Id, IRB.getInt64(GetNextBasicBlockId()), 1);
-  IRB.CreateCall(CsiBBEntry, {Id});
+  // XXX: Don't use structs until LTO optimizes calls using structs away.
+  // Value *Id = IRB.CreateInsertValue(UndefValue::get(CsiIdType), IRB.CreateLoad(ModuleId), 0);
+  // Id = IRB.CreateInsertValue(Id, IRB.getInt64(GetNextBasicBlockId()), 1);
+  // IRB.CreateCall(CsiBBEntry, {Id});
+  Value *mid = IRB.CreateLoad(ModuleId);
+  IRB.CreateCall(CsiBBEntry, {mid, IRB.getInt64(GetNextBasicBlockId())});
   TerminatorInst *TI = BB.getTerminator();
   IRB.SetInsertPoint(TI);
   IRB.CreateCall(CsiBBExit, {});
@@ -374,14 +381,19 @@ void CodeSpectatorInterface::InitializeCsi(Module &M) {
   BasicBlock *CtorBB = BasicBlock::Create(M.getContext(), "", Ctor);
   IRBuilder<> IRB(ReturnInst::Create(M.getContext(), CtorBB));
 
-  StructType *CsiModuleInfoType = StructType::create({Int32Ty, Int64Ty}, "__csi_module_info_t");
-  SmallVector<Type *, 4> InitArgTypes({CsiModuleInfoType});
+  // XXX: Don't use structs until LTO optimizes calls using structs away.
+  // StructType *CsiModuleInfoType = StructType::create({Int32Ty, Int64Ty}, "__csi_module_info_t");
+  // SmallVector<Type *, 4> InitArgTypes({CsiModuleInfoType});
+  SmallVector<Type *, 4> InitArgTypes({IRB.getInt32Ty(), IRB.getInt64Ty()});
   Function *InitFunction = dyn_cast<Function>(M.getOrInsertFunction(CsiModuleInitName, FunctionType::get(IRB.getVoidTy(), InitArgTypes, false)));
   assert(InitFunction);
 
-  Value *Info = IRB.CreateInsertValue(UndefValue::get(CsiModuleInfoType), IRB.CreateLoad(ModuleId), 0);
-  Info = IRB.CreateInsertValue(Info, IRB.getInt64(NumBasicBlocks), 1);
-  CallInst *Call = IRB.CreateCall(InitFunction, {Info});
+  // XXX: Don't use structs until LTO optimizes calls using structs away.
+  // Value *Info = IRB.CreateInsertValue(UndefValue::get(CsiModuleInfoType), IRB.CreateLoad(ModuleId), 0);
+  // Info = IRB.CreateInsertValue(Info, IRB.getInt64(NumBasicBlocks), 1);
+  // CallInst *Call = IRB.CreateCall(InitFunction, {Info});
+  Value *mid = IRB.CreateLoad(ModuleId);
+  CallInst *Call = IRB.CreateCall(InitFunction, {mid, IRB.getInt64(NumBasicBlocks)});
 
   appendToGlobalCtors(M, Ctor, CsiModuleCtorPriority);
 
@@ -590,9 +602,9 @@ const char *CodeSpectatorInterfaceLT::getPassName() const {
 }
 
 bool CodeSpectatorInterfaceLT::runOnModule(Module &M) {
-  LLVMContext &C = M.getContext();
-  StructType *CsiInfoType = StructType::create({IntegerType::get(C, 32)},
-                                               "__csi_info_t");
+  // LLVMContext &C = M.getContext();
+  // StructType *CsiInfoType = StructType::create({IntegerType::get(C, 32)},
+  //                                              "__csi_info_t");
 
   for (GlobalVariable &GV : M.getGlobalList()) {
     if (GV.hasName() && GV.getName().startswith(CsiModuleIdName)) {
@@ -611,9 +623,13 @@ bool CodeSpectatorInterfaceLT::runOnModule(Module &M) {
   IRBuilder<> IRB(ReturnInst::Create(M.getContext(), CtorBB));
 
   const uint32_t NumModules = moduleId;
-  SmallVector<Type *, 4> InitArgTypes({CsiInfoType});
-  SmallVector<Value *, 4> InitArgs({ConstantStruct::get(CsiInfoType, {IRB.getInt32(NumModules)})});
+  // XXX: Don't use structs until LTO optimizes calls using structs away.
+  // SmallVector<Type *, 4> InitArgTypes({CsiInfoType});
+  // SmallVector<Value *, 4> InitArgs({ConstantStruct::get(CsiInfoType, {IRB.getInt32(NumModules)})});
+  SmallVector<Type *, 4> InitArgTypes({IRB.getInt32Ty()});
+  SmallVector<Value *, 4> InitArgs({IRB.getInt32(NumModules)});
 
+  // XXX: use checkCsiInterfaceFunction here.
   Constant *InitFunction = M.getOrInsertFunction(CsiInitName, FunctionType::get(IRB.getVoidTy(), InitArgTypes, false));
   assert(InitFunction);
   IRB.CreateCall(InitFunction, InitArgs);

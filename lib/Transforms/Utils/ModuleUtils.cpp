@@ -97,10 +97,18 @@ llvm::collectUsedGlobalVariables(Module &M, SmallPtrSetImpl<GlobalValue *> &Set,
 
 // XXX: Should really combine the two functions below, but didn't want to
 // change all files that uses checkSanitizerInterfaceFunction, so leave them
-// alone for now ... 
+// alone for now ...
 Function *llvm::checkCsiInterfaceFunction(Constant *FuncOrBitcast) {
-  if (isa<Function>(FuncOrBitcast))
-    return cast<Function>(FuncOrBitcast);
+  if (Function *F = dyn_cast<Function>(FuncOrBitcast)) {
+    return F;
+  }
+  if (ConstantExpr *CE = dyn_cast<ConstantExpr>(FuncOrBitcast)) {
+    if (CE->isCast() && CE->getOpcode() == Instruction::BitCast) {
+      if (Function *F = dyn_cast<Function>(CE->getOperand(0))) {
+        return F;
+      }
+    }
+  }
   FuncOrBitcast->dump();
   std::string Err;
   raw_string_ostream Stream(Err);
